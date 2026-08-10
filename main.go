@@ -17,8 +17,10 @@ import (
 	"unicom/internal/codec"
 	"unicom/internal/config"
 	"unicom/internal/connection"
+	"unicom/internal/devicewatch"
 	"unicom/internal/serialwin"
 	"unicom/internal/session"
+	"unicom/internal/terminalview"
 )
 
 const appTitle = "UniCom 串口调试助手"
@@ -29,10 +31,13 @@ type app struct {
 	encodingCB, sendEncodingCB, lineEndingCB                          *walk.ComboBox
 	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                   *walk.PushButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB *walk.CheckBox
-	hexTXCB, cycleCB                                                  *walk.CheckBox
+	hexTXCB, escapeCB, cycleCB, termModeCB                            *walk.CheckBox
 	receiveTE, sendTE                                                 *walk.TextEdit
 	intervalLE                                                        *walk.LineEdit
 	statusItem, countersItem                                          *walk.StatusBarItem
+	receiveTools, sendPanel, terminalHost                             *walk.Composite
+	terminal                                                          *terminalview.TerminalView
+	deviceWatcher                                                     *devicewatch.Watcher
 
 	manager            *connection.Manager
 	buffer             *session.Buffer
@@ -43,6 +48,9 @@ type app struct {
 	lastRender         time.Time
 	pending            []byte
 	renderEncoding     string
+	termLastRX         uint64
+	termPending        []byte
+	termEncoding       string
 	cycleStop          chan struct{}
 }
 
@@ -60,7 +68,20 @@ func (a *app) run() error {
 	if err := a.createUI(); err != nil {
 		return err
 	}
+	a.dtrCB.CheckedChanged().Attach(a.dtrChanged)
+	a.rtsCB.CheckedChanged().Attach(a.rtsChanged)
+	if err := a.createTerminal(); err != nil {
+		return err
+	}
 	a.manager = connection.New(a.onData, a.onConnectionEvent, a.onTX)
+	watcher, err := devicewatch.New(a.mw, func() {
+		a.manager.DeviceChanged()
+		a.refreshPorts()
+	})
+	if err != nil {
+		return fmt.Errorf("device notification initialization failed: %v", err)
+	}
+	a.deviceWatcher = watcher
 	a.loadSettings()
 	a.refreshPorts()
 	a.updateControls()
@@ -77,33 +98,51 @@ func (a *app) createUI() error {
 		Font: Font{Family: "Microsoft YaHei UI", PointSize: 9}, Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 6},
 		StatusBarItems: []StatusBarItem{{AssignTo: &a.statusItem, Text: "串口已关闭", Width: 620}, {AssignTo: &a.countersItem, Text: "RX 0 B   TX 0 B", Width: 260}},
 		Children: []Widget{
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-				Label{Text: "串口"}, ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
-				Label{Text: "波特率"}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}},
-				Label{Text: "数据位"}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}},
-				Label{Text: "校验"}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}},
-				Label{Text: "停止位"}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}},
-				PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 82}, OnClicked: a.togglePort},
-			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "流控"}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}},
-				CheckBox{AssignTo: &a.dtrCB, Text: "DTR"}, CheckBox{AssignTo: &a.rtsCB, Text: "RTS"}, CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true}, HSpacer{},
-				Label{Text: "接收"}, CheckBox{AssignTo: &a.hexRXCB, Text: "HEX", OnCheckedChanged: a.renderAll}, Label{Text: "编码"}, ComboBox{AssignTo: &a.encodingCB, Model: encodings, OnCurrentIndexChanged: a.renderAll},
-				CheckBox{AssignTo: &a.timestampCB, Text: "时间戳", OnCheckedChanged: a.renderAll}, CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true},
+				CheckBox{AssignTo: &a.termModeCB, Text: "终端模式", OnCheckedChanged: a.termModeChanged},
+				Label{Text: "编码"}, ComboBox{AssignTo: &a.encodingCB, Model: encodings, OnCurrentIndexChanged: a.renderAll},
+				Composite{AssignTo: &a.receiveTools, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+					CheckBox{AssignTo: &a.hexRXCB, Text: "HEX", OnCheckedChanged: a.renderAll},
+					CheckBox{AssignTo: &a.timestampCB, Text: "时间戳", OnCheckedChanged: a.renderAll}, CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true},
+				}},
+				HSpacer{},
 				PushButton{AssignTo: &a.clearBtn, Text: "清空", OnClicked: a.clearReceive}, PushButton{AssignTo: &a.saveBtn, Text: "保存", OnClicked: a.saveReceive},
 			}},
 			TextEdit{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, HScroll: true, MaxLength: 4 * 1024 * 1024, Font: Font{Family: "Consolas", PointSize: 10}},
-			Composite{Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
+			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
+			Composite{AssignTo: &a.sendPanel, Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
 				TextEdit{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, HScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
 				Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-					CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送"}, Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
+					CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送", OnCheckedChanged: a.updateEscapeState}, CheckBox{AssignTo: &a.escapeCB, Text: "启用转义"},
+					Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
 					Label{Text: "行尾"}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}},
 					CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", OnCheckedChanged: a.cycleChanged}, LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, MinSize: Size{Width: 70}}, Label{Text: "ms"}, HSpacer{},
 					PushButton{AssignTo: &a.sendBtn, Text: "发送", MinSize: Size{Width: 92}, OnClicked: a.send},
 				}},
 			}},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
+				Label{Text: "串口"}, ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
+				Label{Text: "波特率"}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}},
+				Label{Text: "数据位"}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}},
+				HSpacer{}, PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 92}, OnClicked: a.togglePort},
+			}},
+			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				Label{Text: "校验"}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}},
+				Label{Text: "停止位"}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}},
+				Label{Text: "流控"}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}},
+				CheckBox{AssignTo: &a.dtrCB, Text: "DTR"}, CheckBox{AssignTo: &a.rtsCB, Text: "RTS"}, CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true}, HSpacer{},
+			}},
 		},
 	}.Create()
+}
+
+func (a *app) createTerminal() error {
+	view, err := terminalview.New(a.terminalHost, a.termSendBytes, a.termSendText)
+	if err != nil {
+		return err
+	}
+	a.terminal = view
+	return nil
 }
 
 func (a *app) serialConfig() (serialwin.Config, error) {
@@ -168,6 +207,10 @@ func (a *app) scheduleRender() {
 
 func (a *app) renderAll() {
 	data, rx := a.buffer.Snapshot()
+	if a.termModeCB != nil && a.termModeCB.Checked() {
+		a.replayTerminal(data, rx)
+		return
+	}
 	var text string
 	if a.hexRXCB.Checked() {
 		text = codec.HexDump(data)
@@ -200,6 +243,10 @@ func (a *app) renderAll() {
 }
 
 func (a *app) renderPending() {
+	if a.termModeCB != nil && a.termModeCB.Checked() {
+		a.renderTerminalPending()
+		return
+	}
 	if a.timestampCB.Checked() || a.renderEncoding != a.selectedEncoding() {
 		a.renderAll()
 		return
@@ -256,7 +303,15 @@ func (a *app) makeSendData() ([]byte, error) {
 	if a.hexTXCB.Checked() {
 		return codec.ParseHex(a.sendTE.Text())
 	}
-	b, err := codec.Encode(a.sendTE.Text(), a.sendEncodingCB.Text())
+	text := a.sendTE.Text()
+	var err error
+	if a.escapeCB.Checked() {
+		text, err = codec.Unescape(text)
+		if err != nil {
+			return nil, err
+		}
+	}
+	b, err := codec.Encode(text, a.sendEncodingCB.Text())
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +379,12 @@ func (a *app) refreshPorts() {
 func (a *app) clearReceive() {
 	a.buffer.Clear()
 	a.pending = a.pending[:0]
+	a.termPending = a.termPending[:0]
+	a.termLastRX = 0
 	a.receiveTE.SetText("")
+	if a.terminal != nil {
+		a.terminal.Reset()
+	}
 	a.lastShownRX = 0
 	a.updateCounters(0)
 }
@@ -340,6 +400,8 @@ func (a *app) saveReceive() {
 	var data []byte
 	if strings.HasSuffix(strings.ToLower(dlg.FilePath), ".bin") {
 		data, _ = a.buffer.Snapshot()
+	} else if a.termModeCB.Checked() && a.terminal != nil {
+		data = []byte(a.terminal.Text())
 	} else {
 		data = []byte(a.receiveTE.Text())
 	}
@@ -356,9 +418,122 @@ func (a *app) updateControls() {
 	a.openBtn.SetText(map[bool]string{true: "关闭串口", false: "打开串口"}[opening])
 	a.sendBtn.SetEnabled(connected)
 	a.refreshBtn.SetEnabled(!opening)
-	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB, a.dtrCB, a.rtsCB} {
+	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
 	}
+	a.dtrCB.SetEnabled(!opening || connected)
+	a.rtsCB.SetEnabled(!opening || connected)
+}
+
+func (a *app) dtrChanged() {
+	if a.manager == nil || !a.manager.Connected() {
+		return
+	}
+	if err := a.manager.SetDTR(a.dtrCB.Checked()); err != nil {
+		a.statusItem.SetText(err.Error())
+	}
+}
+
+func (a *app) rtsChanged() {
+	if a.manager == nil || !a.manager.Connected() {
+		return
+	}
+	if err := a.manager.SetRTS(a.rtsCB.Checked()); err != nil {
+		a.statusItem.SetText(err.Error())
+	}
+}
+
+func (a *app) updateEscapeState() {
+	if a.escapeCB != nil && a.hexTXCB != nil {
+		a.escapeCB.SetEnabled(!a.hexTXCB.Checked())
+	}
+}
+
+func (a *app) termModeChanged() {
+	if a.terminalHost == nil || a.sendPanel == nil || a.receiveTE == nil {
+		return
+	}
+	term := a.termModeCB.Checked()
+	a.receiveTools.SetVisible(!term)
+	a.receiveTE.SetVisible(!term)
+	a.sendPanel.SetVisible(!term)
+	a.terminalHost.SetVisible(term)
+	if term {
+		if a.cycleCB.Checked() {
+			a.cycleCB.SetChecked(false)
+		}
+		a.renderAll()
+		if a.terminal != nil {
+			a.terminal.SetFocus()
+		}
+	} else {
+		a.renderAll()
+	}
+}
+
+func (a *app) termSendBytes(p []byte) error {
+	if a.manager == nil {
+		return fmt.Errorf("串口未连接")
+	}
+	err := a.manager.Write(p)
+	if err != nil && a.statusItem != nil {
+		a.statusItem.SetText(err.Error())
+	}
+	return err
+}
+
+func (a *app) termSendText(text string) error {
+	b, err := codec.Encode(text, a.selectedEncoding())
+	if err != nil {
+		return err
+	}
+	return a.termSendBytes(b)
+}
+
+func (a *app) replayTerminal(data []byte, rx uint64) {
+	if a.terminal == nil {
+		return
+	}
+	a.termPending = a.termPending[:0]
+	a.termEncoding = a.selectedEncoding()
+	a.terminal.Reset()
+	if len(data) > 0 {
+		a.terminal.Feed([]byte(codec.Decode(data, a.termEncoding)))
+	}
+	a.termLastRX, a.lastShownRX = rx, rx
+	a.updateCounters(rx)
+}
+
+func (a *app) renderTerminalPending() {
+	if a.terminal == nil {
+		return
+	}
+	if a.termEncoding != a.selectedEncoding() {
+		data, rx := a.buffer.Snapshot()
+		a.replayTerminal(data, rx)
+		return
+	}
+	data, rx, reset := a.buffer.Delta(a.termLastRX)
+	if reset {
+		all, total := a.buffer.Snapshot()
+		a.replayTerminal(all, total)
+		return
+	}
+	if len(data) == 0 {
+		a.lastShownRX = rx
+		a.updateCounters(rx)
+		return
+	}
+	data = append(a.termPending, data...)
+	n := codec.CompletePrefix(data, a.termEncoding)
+	a.termPending = append(a.termPending[:0], data[n:]...)
+	if n > 0 {
+		if err := a.terminal.Feed([]byte(codec.Decode(data[:n], a.termEncoding))); err != nil {
+			a.statusItem.SetText(err.Error())
+		}
+	}
+	a.termLastRX, a.lastShownRX = rx, rx
+	a.updateCounters(rx)
 }
 func (a *app) updateCounters(rx uint64) {
 	a.mu.Lock()
@@ -409,6 +584,9 @@ func (a *app) loadSettings() {
 	a.dtrCB.SetChecked(config.LoadInt("DTR", 0) != 0)
 	a.rtsCB.SetChecked(config.LoadInt("RTS", 0) != 0)
 	a.autoReconnectCB.SetChecked(config.LoadInt("AutoReconnect", 1) != 0)
+	a.escapeCB.SetChecked(config.LoadInt("Escape", 0) != 0)
+	a.updateEscapeState()
+	a.termModeCB.SetChecked(config.LoadInt("TermMode", 0) != 0)
 }
 func (a *app) saveSettings() {
 	config.Save("Port", a.portCB.Text())
@@ -424,6 +602,8 @@ func (a *app) saveSettings() {
 	saveBool("DTR", a.dtrCB.Checked())
 	saveBool("RTS", a.rtsCB.Checked())
 	saveBool("AutoReconnect", a.autoReconnectCB.Checked())
+	saveBool("Escape", a.escapeCB.Checked())
+	saveBool("TermMode", a.termModeCB.Checked())
 }
 func setIndex(cb *walk.ComboBox, index int) {
 	if index < 0 {

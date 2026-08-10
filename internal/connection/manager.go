@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"unicom/internal/serialwin"
 )
@@ -30,33 +29,58 @@ type Manager struct {
 	port       *serialwin.Port
 	config     serialwin.Config
 	wanted     bool
+	present    bool
 	generation uint64
+	wake       chan struct{}
+	wg         sync.WaitGroup
 	onData     func([]byte)
 	onEvent    func(Event)
 	onTX       func(int)
 }
 
 func New(onData func([]byte), onEvent func(Event), onTX func(int)) *Manager {
-	return &Manager{onData: onData, onEvent: onEvent, onTX: onTX}
+	return &Manager{
+		onData:  onData,
+		onEvent: onEvent,
+		onTX:    onTX,
+		wake:    make(chan struct{}, 1),
+	}
 }
 
 func (m *Manager) Open(c serialwin.Config) {
+	m.stopCurrent()
+	m.drainSignal()
+
 	m.mu.Lock()
-	if m.port != nil {
-		m.port.Close()
-		m.port = nil
-	}
 	m.config = c
 	m.wanted = true
+	m.present = serialwin.Exists(c.Name)
 	m.generation++
 	gen := m.generation
+	m.wg.Add(1)
 	m.mu.Unlock()
+
 	go m.connectLoop(gen)
 }
 
+func (m *Manager) stopCurrent() {
+	m.mu.Lock()
+	m.wanted = false
+	m.generation++
+	p := m.port
+	m.port = nil
+	m.mu.Unlock()
+
+	if p != nil {
+		_ = p.Close()
+	}
+	m.signal()
+	m.wg.Wait()
+}
+
 func (m *Manager) connectLoop(gen uint64) {
-	delays := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 5 * time.Second}
-	attempt := 0
+	defer m.wg.Done()
+
 	for {
 		m.mu.Lock()
 		if !m.wanted || gen != m.generation {
@@ -65,86 +89,154 @@ func (m *Manager) connectLoop(gen uint64) {
 		}
 		c := m.config
 		m.mu.Unlock()
-		if attempt == 0 {
-			m.emit(Event{StateConnecting, "正在打开 " + c.Name + "..."})
-		} else {
-			delay := delays[min(attempt-1, len(delays)-1)]
-			m.emit(Event{StateWaiting, fmt.Sprintf("等待 %s，%.1f 秒后重试", c.Name, delay.Seconds())})
-			time.Sleep(delay)
-		}
-		p, err := serialwin.Open(c)
-		if err != nil {
-			m.emit(Event{StateWaiting, err.Error()})
-			attempt++
+
+		if !serialwin.Exists(c.Name) {
+			m.setPresent(false)
+			m.emit(Event{StateWaiting, fmt.Sprintf("等待设备事件: %s", c.Name)})
+			if !m.waitForDevice(gen) {
+				return
+			}
 			continue
 		}
+
+		m.setPresent(true)
+		m.emit(Event{StateConnecting, "正在打开 " + c.Name + "..."})
+		p, err := serialwin.Open(c)
+		if err != nil {
+			m.emit(Event{StateWaiting, fmt.Sprintf("%s 暂不可用，等待设备事件", c.Name)})
+			if !m.waitForDevice(gen) {
+				return
+			}
+			continue
+		}
+
 		m.mu.Lock()
 		if !m.wanted || gen != m.generation {
 			m.mu.Unlock()
-			p.Close()
+			_ = p.Close()
 			return
 		}
 		m.port = p
 		m.mu.Unlock()
 		m.emit(Event{StateConnected, c.Name + " 已连接"})
-		err = m.readLoop(gen, p, c.Name)
+
+		err = m.readLoop(gen, p)
 		m.mu.Lock()
 		if m.port == p {
 			m.port = nil
 		}
 		wanted := m.wanted && gen == m.generation
 		m.mu.Unlock()
-		p.Close()
+		_ = p.Close()
 		if !wanted {
 			return
 		}
-		m.emit(Event{StateWaiting, "连接中断: " + err.Error()})
-		attempt = 1
+
+		m.emit(Event{StateWaiting, fmt.Sprintf("连接中断: %v；等待设备事件", err)})
+		if !m.waitForDevice(gen) {
+			return
+		}
 	}
 }
 
-func (m *Manager) readLoop(gen uint64, p *serialwin.Port, name string) error {
-	b := make([]byte, 8192)
-	lastPresenceCheck := time.Now()
+func (m *Manager) readLoop(gen uint64, p *serialwin.Port) error {
+	buf := make([]byte, 8192)
 	for {
-		n, err := p.Read(b)
+		n, err := p.Read(buf)
 		if n > 0 {
-			q := make([]byte, n)
-			copy(q, b[:n])
-			m.onData(q)
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			m.onData(data)
 		}
 		if err != nil {
 			return err
 		}
+
 		m.mu.Lock()
 		active := m.wanted && gen == m.generation && m.port == p
 		m.mu.Unlock()
 		if !active {
-			return errors.New("已关闭")
+			return errors.New("串口已关闭")
 		}
-		if time.Since(lastPresenceCheck) >= time.Second {
-			if !serialwin.Exists(name) {
-				return errors.New("设备已断开")
-			}
-			lastPresenceCheck = time.Now()
-		}
+	}
+}
+
+func (m *Manager) waitForDevice(gen uint64) bool {
+	m.mu.Lock()
+	active := m.wanted && gen == m.generation
+	wake := m.wake
+	m.mu.Unlock()
+	if !active {
+		return false
+	}
+
+	<-wake
+	m.mu.Lock()
+	active = m.wanted && gen == m.generation
+	m.mu.Unlock()
+	return active
+}
+
+// DeviceChanged handles a WM_DEVICECHANGE notification. Events for unrelated
+// COM ports are ignored by comparing the target port's current presence.
+func (m *Manager) DeviceChanged() {
+	m.mu.Lock()
+	if !m.wanted {
+		m.mu.Unlock()
+		return
+	}
+	c := m.config
+	wasPresent := m.present
+	m.mu.Unlock()
+
+	present := serialwin.Exists(c.Name)
+	if present == wasPresent {
+		return
+	}
+
+	m.mu.Lock()
+	if !m.wanted || m.config.Name != c.Name || m.present == present {
+		m.mu.Unlock()
+		return
+	}
+	m.present = present
+	p := m.port
+	m.mu.Unlock()
+
+	// Release the handle immediately on removal so Windows can reuse the COM
+	// number when the same USB serial device returns.
+	if !present && p != nil {
+		_ = p.Close()
+	}
+	m.signal()
+}
+
+func (m *Manager) setPresent(present bool) {
+	m.mu.Lock()
+	m.present = present
+	m.mu.Unlock()
+}
+
+func (m *Manager) signal() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) drainSignal() {
+	select {
+	case <-m.wake:
+	default:
 	}
 }
 
 func (m *Manager) Close() {
-	m.mu.Lock()
-	m.wanted = false
-	m.generation++
-	p := m.port
-	m.port = nil
-	m.mu.Unlock()
-	if p != nil {
-		p.Close()
-	}
+	m.stopCurrent()
 	m.emit(Event{StateClosed, "串口已关闭"})
 }
 
-func (m *Manager) Write(b []byte) error {
+func (m *Manager) Write(data []byte) error {
 	m.mu.Lock()
 	p := m.port
 	wanted := m.wanted
@@ -152,28 +244,51 @@ func (m *Manager) Write(b []byte) error {
 	if !wanted || p == nil {
 		return errors.New("串口未连接")
 	}
-	n, err := p.Write(b)
+
+	n, err := p.Write(data)
 	if n > 0 && m.onTX != nil {
 		m.onTX(n)
 	}
 	if err != nil {
-		p.Close()
+		_ = p.Close()
 		return err
 	}
-	if n != len(b) {
+	if n != len(data) {
 		return errors.New("串口只发送了部分数据")
 	}
 	return nil
 }
-func (m *Manager) Connected() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.port != nil }
+
+func (m *Manager) SetDTR(enabled bool) error {
+	m.mu.Lock()
+	p := m.port
+	m.config.DTR = enabled
+	m.mu.Unlock()
+	if p == nil {
+		return errors.New("串口未连接")
+	}
+	return p.SetDTR(enabled)
+}
+
+func (m *Manager) SetRTS(enabled bool) error {
+	m.mu.Lock()
+	p := m.port
+	m.config.RTS = enabled
+	m.mu.Unlock()
+	if p == nil {
+		return errors.New("串口未连接")
+	}
+	return p.SetRTS(enabled)
+}
+
+func (m *Manager) Connected() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.port != nil
+}
+
 func (m *Manager) emit(e Event) {
 	if m.onEvent != nil {
 		m.onEvent(e)
 	}
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

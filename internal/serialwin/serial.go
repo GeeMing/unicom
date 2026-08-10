@@ -44,6 +44,13 @@ const (
 	FlowXONXOFF
 )
 
+const (
+	setRTS   = 3
+	clearRTS = 4
+	setDTR   = 5
+	clearDTR = 6
+)
+
 type dcb struct {
 	Length, BaudRate, Flags                        uint32
 	Reserved, XonLim, XoffLim                      uint16
@@ -65,6 +72,7 @@ var (
 	setupComm       = kernel32.NewProc("SetupComm")
 	purgeComm       = kernel32.NewProc("PurgeComm")
 	queryDosDevice  = kernel32.NewProc("QueryDosDeviceW")
+	escapeComm      = kernel32.NewProc("EscapeCommFunction")
 )
 
 type Port struct {
@@ -103,7 +111,7 @@ func (p *Port) configure(c Config) error {
 		return fmt.Errorf("读取串口参数失败: %v", e)
 	}
 	d.BaudRate, d.ByteSize, d.Parity, d.StopBits = c.BaudRate, c.DataBits, c.Parity, c.StopBits
-	// fBinary | optional parity checking; clear flow-control related fields first.
+	// Keep fBinary and clear parity, flow-control, DTR, and RTS fields.
 	d.Flags = (d.Flags &^ uint32(0x7FFE)) | 1
 	if c.Parity != ParityNone {
 		d.Flags |= 2
@@ -160,6 +168,35 @@ func (p *Port) Write(buf []byte) (int, error) {
 	return int(n), err
 }
 
+func (p *Port) setLineState(command uintptr) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("串口已关闭")
+	}
+	h := p.h
+	p.mu.Unlock()
+	r, _, e := escapeComm.Call(uintptr(h), command)
+	if r == 0 {
+		return fmt.Errorf("设置串口控制线失败: %v", e)
+	}
+	return nil
+}
+
+func (p *Port) SetDTR(enabled bool) error {
+	if enabled {
+		return p.setLineState(setDTR)
+	}
+	return p.setLineState(clearDTR)
+}
+
+func (p *Port) SetRTS(enabled bool) error {
+	if enabled {
+		return p.setLineState(setRTS)
+	}
+	return p.setLineState(clearRTS)
+}
+
 func (p *Port) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -169,6 +206,9 @@ func (p *Port) Close() error {
 	p.closed = true
 	h := p.h
 	p.mu.Unlock()
+
+	// Purge pending I/O before releasing the handle. Close is idempotent, so a
+	// removal notification and a read failure can safely race.
 	purgeComm.Call(uintptr(h), 0x0001|0x0002|0x0004|0x0008)
 	return syscall.CloseHandle(h)
 }

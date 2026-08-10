@@ -5,6 +5,8 @@ package codec
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf16"
@@ -113,6 +115,85 @@ func ParseHex(s string) ([]byte, error) {
 		return nil, errors.New("HEX 中含有非法字符")
 	}
 	return b, nil
+}
+
+// Unescape expands common serial-tool escape sequences in text send mode.
+func Unescape(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+1 >= len(s) {
+			return "", errors.New("转义符后缺少字符")
+		}
+		i++
+		switch s[i] {
+		case '\\':
+			b.WriteByte('\\')
+		case '0':
+			b.WriteByte(0)
+		case 'a':
+			b.WriteByte('\a')
+		case 'b':
+			b.WriteByte('\b')
+		case 'e':
+			b.WriteByte(0x1B)
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case 'x':
+			v, next, err := parseEscapeHex(s, i+1, 2)
+			if err != nil {
+				return "", err
+			}
+			b.WriteRune(rune(v))
+			i = next - 1
+		case 'u':
+			v, next, err := parseEscapeHex(s, i+1, 4)
+			if err != nil {
+				return "", err
+			}
+			if v >= 0xD800 && v <= 0xDFFF {
+				return "", errors.New("\\u 不能单独表示 UTF-16 代理项")
+			}
+			b.WriteRune(rune(v))
+			i = next - 1
+		case 'U':
+			v, next, err := parseEscapeHex(s, i+1, 8)
+			if err != nil {
+				return "", err
+			}
+			if v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF) {
+				return "", errors.New("\\U Unicode 码点无效")
+			}
+			b.WriteRune(rune(v))
+			i = next - 1
+		default:
+			return "", fmt.Errorf("不支持的转义序列: \\%c", s[i])
+		}
+	}
+	return b.String(), nil
+}
+
+func parseEscapeHex(s string, start, width int) (uint64, int, error) {
+	end := start + width
+	if end > len(s) {
+		return 0, start, errors.New("十六进制转义长度不足")
+	}
+	v, err := strconv.ParseUint(s[start:end], 16, 32)
+	if err != nil {
+		return 0, start, errors.New("十六进制转义中含有非法字符")
+	}
+	return v, end, nil
 }
 
 func HexDump(data []byte) string {

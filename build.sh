@@ -16,7 +16,7 @@ BUILD_ROOT="$PROJECT_ROOT/build"
 STAGE="$BUILD_ROOT/gopath/src/unicom"
 GO_EXE="$PROJECT_ROOT/.tools/go1.10.8/go/bin/go.exe"
 RESOURCE="$PROJECT_ROOT/resources/unicom_windows_386.syso"
-OUTPUT="$BUILD_ROOT/UniCom-XP-x86.exe"
+OUTPUT="$BUILD_ROOT/unicom.exe"
 
 if [[ ! -f "$GO_EXE" ]]; then
   echo "Go 1.10.8 was not found: $GO_EXE" >&2

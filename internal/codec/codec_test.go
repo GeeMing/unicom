@@ -50,3 +50,19 @@ func TestCompletePrefix(t *testing.T) {
 		t.Fatalf("partial UTF-16: %d", n)
 	}
 }
+
+func TestUnescape(t *testing.T) {
+	got, err := Unescape(`AT\r\n\x41\u4E2D\\`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "AT\r\nA中\\" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err = Unescape(`bad\q`); err == nil {
+		t.Fatal("expected unsupported escape error")
+	}
+	if _, err = Unescape(`bad\x1`); err == nil {
+		t.Fatal("expected short hex error")
+	}
+}
