@@ -37,6 +37,7 @@ type app struct {
 	intervalLE                                                        *walk.LineEdit
 	statusItem, countersItem                                          *walk.StatusBarItem
 	receiveTools, sendPanel, terminalHost                             *walk.Composite
+	contentSplitter                                                   *walk.Splitter
 	terminal                                                          *terminalview.TerminalView
 	deviceWatcher                                                     *devicewatch.Watcher
 
@@ -114,29 +115,31 @@ func (a *app) createUI() error {
 				HSpacer{},
 				PushButton{AssignTo: &a.clearBtn, Text: "清空", OnClicked: a.clearReceive}, PushButton{AssignTo: &a.saveBtn, Text: "保存", OnClicked: a.saveReceive},
 			}},
-			wrapedit.View{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, MaxLength: 4 * 1024 * 1024, Font: Font{Family: "Consolas", PointSize: 10}},
-			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
-			Composite{AssignTo: &a.sendPanel, Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-				wrapedit.View{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
-				Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-					CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送", OnCheckedChanged: a.updateEscapeState}, CheckBox{AssignTo: &a.escapeCB, Text: "启用转义"},
-					CheckBox{AssignTo: &a.wrapTXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateSendWrap},
-					Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
-					Label{Text: "行尾"}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}},
-					CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", OnCheckedChanged: a.cycleChanged}, LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, MinSize: Size{Width: 70}}, Label{Text: "ms"}, HSpacer{},
-					PushButton{AssignTo: &a.sendBtn, Text: "发送", MinSize: Size{Width: 92}, OnClicked: a.send},
+			VSplitter{AssignTo: &a.contentSplitter, Name: "rxTxSplitter", HandleWidth: 6, Children: []Widget{
+				wrapedit.View{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, MaxLength: 4 * 1024 * 1024, MinSize: Size{Height: 100}, StretchFactor: 3, Font: Font{Family: "Consolas", PointSize: 10}},
+				Composite{AssignTo: &a.sendPanel, Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
+					wrapedit.View{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
+					Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+						CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送", OnCheckedChanged: a.updateEscapeState}, CheckBox{AssignTo: &a.escapeCB, Text: "启用转义"},
+						CheckBox{AssignTo: &a.wrapTXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateSendWrap},
+						Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
+						Label{Text: "行尾"}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}},
+						CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", OnCheckedChanged: a.cycleChanged}, LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, MinSize: Size{Width: 70}}, Label{Text: "ms"}, HSpacer{},
+						PushButton{AssignTo: &a.sendBtn, Text: "发送", MinSize: Size{Width: 92}, OnClicked: a.send},
+					}},
 				}},
 			}},
+			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-				Label{Text: "串口"}, ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
-				Label{Text: "波特率"}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}},
-				Label{Text: "数据位"}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}},
+				Label{Text: "串口"}, ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
+				Label{Text: "波特率"}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}},
 				HSpacer{}, PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 92}, OnClicked: a.togglePort},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "校验"}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}},
-				Label{Text: "停止位"}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}},
-				Label{Text: "流控"}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}},
+				Label{Text: "数据位"}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 55}},
+				Label{Text: "校验"}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, MinSize: Size{Width: 65}, MaxSize: Size{Width: 78}},
+				Label{Text: "停止位"}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 58}},
+				Label{Text: "流控"}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}, MinSize: Size{Width: 78}, MaxSize: Size{Width: 92}},
 				CheckBox{AssignTo: &a.dtrCB, Text: "DTR"}, CheckBox{AssignTo: &a.rtsCB, Text: "RTS"}, CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true}, HSpacer{},
 			}},
 		},
@@ -476,13 +479,12 @@ func setTextEditWrap(te *wrapedit.Edit, wrap bool) {
 }
 
 func (a *app) termModeChanged() {
-	if a.terminalHost == nil || a.sendPanel == nil || a.receiveTE == nil {
+	if a.terminalHost == nil || a.contentSplitter == nil {
 		return
 	}
 	term := a.termModeCB.Checked()
 	a.receiveTools.SetVisible(!term)
-	a.receiveTE.SetVisible(!term)
-	a.sendPanel.SetVisible(!term)
+	a.contentSplitter.SetVisible(!term)
 	a.terminalHost.SetVisible(term)
 	if term {
 		if a.cycleCB.Checked() {

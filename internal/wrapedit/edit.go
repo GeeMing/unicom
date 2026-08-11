@@ -203,6 +203,7 @@ type View struct {
 	Font          declarative.Font
 	MinSize       declarative.Size
 	MaxSize       declarative.Size
+	StretchFactor int
 	ReadOnly      declarative.Property
 	Text          declarative.Property
 	Visible       declarative.Property
