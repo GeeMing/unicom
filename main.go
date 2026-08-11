@@ -24,7 +24,14 @@ import (
 	"unicom/internal/wrapedit"
 )
 
-const appTitle = "UniCom 串口调试助手"
+const appName = "UniCom 串口调试助手"
+
+var (
+	VERSION    = "0.0.1"
+	GIT_HASH   = "unknown"
+	BUILD_TIME = "unknown"
+	appTitle   = fmt.Sprintf("%s v%s | %s | %s", appName, VERSION, GIT_HASH, BUILD_TIME)
+)
 
 type app struct {
 	mw                                                                *walk.MainWindow

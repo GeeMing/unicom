@@ -11,12 +11,18 @@ case "${1:-}" in
     ;;
 esac
 
+
+VERSION="0.0.1"
+GIT_HASH=$(printf '%s@%.7s' "$(git symbolic-ref --short -q HEAD)" "$(git log -1 --format=%H)")
+BUILD_TIME=$(date '+%Y-%m-%d_%H:%M:%S_%z')
+
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILD_ROOT="$PROJECT_ROOT/build"
 STAGE="$BUILD_ROOT/gopath/src/unicom"
 GO_EXE="$PROJECT_ROOT/.tools/go1.10.8/go/bin/go.exe"
 RESOURCE="$PROJECT_ROOT/resources/unicom_windows_386.syso"
 OUTPUT="$BUILD_ROOT/unicom.exe"
+
 
 if [[ ! -f "$GO_EXE" ]]; then
   echo "Go 1.10.8 was not found: $GO_EXE" >&2
@@ -56,7 +62,8 @@ if [[ "$SKIP_TESTS" -eq 0 ]]; then
 fi
 
 OUTPUT_WIN="$(cygpath -w "$OUTPUT")"
-"$GO_EXE" build -ldflags "-H windowsgui -s -w" -o "$OUTPUT_WIN" unicom
+LDFLAGS="-H windowsgui -s -w -X main.VERSION=$VERSION -X main.GIT_HASH=$GIT_HASH -X main.BUILD_TIME=$BUILD_TIME"
+"$GO_EXE" build -ldflags "$LDFLAGS" -o "$OUTPUT_WIN" unicom
 
 SIZE="$(stat -c '%s' "$OUTPUT")"
-printf 'Build complete: %s (%s bytes)\n' "$OUTPUT" "$SIZE"
+printf 'Build complete: %s (%s bytes)\nVersion: %s | %s | %s\n' "$OUTPUT" "$SIZE" "$VERSION" "$GIT_HASH" "$BUILD_TIME"
