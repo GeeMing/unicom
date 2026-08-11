@@ -1,4 +1,5 @@
 1 24 "app.manifest"
+1 ICON "unicom.ico"
 
 1 VERSIONINFO
 FILEVERSION 1,0,0,0
@@ -15,7 +16,7 @@ BEGIN
       VALUE "FileDescription", "UniCom Serial Debug Tool\0"
       VALUE "FileVersion", "1.0.0\0"
       VALUE "InternalName", "UniCom\0"
-      VALUE "OriginalFilename", "UniCom-XP-x86.exe\0"
+      VALUE "OriginalFilename", "unicom.exe\0"
       VALUE "ProductName", "UniCom Serial Debug Tool\0"
       VALUE "ProductVersion", "1.0.0\0"
     END

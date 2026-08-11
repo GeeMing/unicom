@@ -67,7 +67,13 @@ func main() {
 }
 
 func (a *app) run() error {
-	if err := a.createUI(); err != nil {
+	windowIcon, err := walk.NewIconFromResourceId(1)
+	if err != nil {
+		return fmt.Errorf("load application icon: %v", err)
+	}
+	defer windowIcon.Dispose()
+
+	if err := a.createUI(windowIcon); err != nil {
 		return err
 	}
 	a.dtrCB.CheckedChanged().Attach(a.dtrChanged)
@@ -98,9 +104,10 @@ func (a *app) run() error {
 	return nil
 }
 
-func (a *app) createUI() error {
+func (a *app) createUI(windowIcon *walk.Icon) error {
 	return MainWindow{
 		AssignTo: &a.mw, Title: appTitle, MinSize: Size{Width: 840, Height: 580}, Size: Size{Width: 1040, Height: 720},
+		Icon: windowIcon,
 		Font: Font{Family: "Microsoft YaHei UI", PointSize: 9}, Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 6},
 		StatusBarItems: []StatusBarItem{{AssignTo: &a.statusItem, Text: "串口已关闭", Width: 620}, {AssignTo: &a.countersItem, Text: "RX 0 B   TX 0 B", Width: 260}},
 		Children: []Widget{

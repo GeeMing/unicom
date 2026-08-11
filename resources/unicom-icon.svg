@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>UniCom desktop serial monitor icon</title>
+  <rect x="14" y="25" width="170" height="151" rx="18" fill="#12263A"/>
+  <rect x="27" y="39" width="144" height="112" rx="8" fill="#DDF6FF"/>
+  <rect x="34" y="46" width="130" height="98" rx="4" fill="#49BBD0"/>
+  <path d="M45 103h18l12-29 18 55 17-43 16 32h25" fill="none" stroke="#FFF4DD" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="159" cy="163" r="5" fill="#56E0D5"/>
+  <path d="M91 176h28v26h-28z" fill="#173D57"/>
+  <path d="M66 202h78c8 0 14 6 14 14v5H52v-5c0-8 6-14 14-14z" fill="#12263A"/>
+  <circle cx="150" cy="178" r="9" fill="#E2EDF2" stroke="#6F8794" stroke-width="8"/>
+  <circle cx="247" cy="178" r="9" fill="#E2EDF2" stroke="#6F8794" stroke-width="8"/>
+  <path d="M150 151h99l-9 54h-81z" fill="#E2EDF2" stroke="#6F8794" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M158 161h83l-6 35h-71z" fill="#29485A"/>
+  <g fill="#FFB84A">
+    <circle cx="168" cy="171" r="4.5"/><circle cx="184" cy="171" r="4.5"/><circle cx="200" cy="171" r="4.5"/><circle cx="216" cy="171" r="4.5"/><circle cx="232" cy="171" r="4.5"/>
+    <circle cx="176" cy="187" r="4.5"/><circle cx="192" cy="187" r="4.5"/><circle cx="208" cy="187" r="4.5"/><circle cx="224" cy="187" r="4.5"/>
+  </g>
+</svg>
