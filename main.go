@@ -21,6 +21,7 @@ import (
 	"unicom/internal/serialwin"
 	"unicom/internal/session"
 	"unicom/internal/terminalview"
+	"unicom/internal/wrapedit"
 )
 
 const appTitle = "UniCom 串口调试助手"
@@ -31,8 +32,8 @@ type app struct {
 	encodingCB, sendEncodingCB, lineEndingCB                          *walk.ComboBox
 	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                   *walk.PushButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB *walk.CheckBox
-	hexTXCB, escapeCB, cycleCB, termModeCB                            *walk.CheckBox
-	receiveTE, sendTE                                                 *walk.TextEdit
+	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB        *walk.CheckBox
+	receiveTE, sendTE                                                 *wrapedit.Edit
 	intervalLE                                                        *walk.LineEdit
 	statusItem, countersItem                                          *walk.StatusBarItem
 	receiveTools, sendPanel, terminalHost                             *walk.Composite
@@ -70,6 +71,8 @@ func (a *app) run() error {
 	}
 	a.dtrCB.CheckedChanged().Attach(a.dtrChanged)
 	a.rtsCB.CheckedChanged().Attach(a.rtsChanged)
+	a.receiveTE.SizeChanged().Attach(a.updateReceiveWrap)
+	a.sendTE.SizeChanged().Attach(a.updateSendWrap)
 	if err := a.createTerminal(); err != nil {
 		return err
 	}
@@ -88,6 +91,8 @@ func (a *app) run() error {
 	a.mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) { a.stopCycle(); a.manager.Close(); a.saveSettings() })
 	go a.periodicUI()
 	a.mw.Show()
+	a.updateReceiveWrap()
+	a.updateSendWrap()
 	a.mw.Run()
 	return nil
 }
@@ -104,16 +109,18 @@ func (a *app) createUI() error {
 				Composite{AssignTo: &a.receiveTools, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
 					CheckBox{AssignTo: &a.hexRXCB, Text: "HEX", OnCheckedChanged: a.renderAll},
 					CheckBox{AssignTo: &a.timestampCB, Text: "时间戳", OnCheckedChanged: a.renderAll}, CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true},
+					CheckBox{AssignTo: &a.wrapRXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateReceiveWrap},
 				}},
 				HSpacer{},
 				PushButton{AssignTo: &a.clearBtn, Text: "清空", OnClicked: a.clearReceive}, PushButton{AssignTo: &a.saveBtn, Text: "保存", OnClicked: a.saveReceive},
 			}},
-			TextEdit{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, HScroll: true, MaxLength: 4 * 1024 * 1024, Font: Font{Family: "Consolas", PointSize: 10}},
+			wrapedit.View{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, MaxLength: 4 * 1024 * 1024, Font: Font{Family: "Consolas", PointSize: 10}},
 			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
 			Composite{AssignTo: &a.sendPanel, Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-				TextEdit{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, HScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
+				wrapedit.View{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
 				Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
 					CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送", OnCheckedChanged: a.updateEscapeState}, CheckBox{AssignTo: &a.escapeCB, Text: "启用转义"},
+					CheckBox{AssignTo: &a.wrapTXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateSendWrap},
 					Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
 					Label{Text: "行尾"}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}},
 					CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", OnCheckedChanged: a.cycleChanged}, LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, MinSize: Size{Width: 70}}, Label{Text: "ms"}, HSpacer{},
@@ -421,8 +428,8 @@ func (a *app) updateControls() {
 	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
 	}
-	a.dtrCB.SetEnabled(!opening || connected)
-	a.rtsCB.SetEnabled(!opening || connected)
+	a.dtrCB.SetEnabled(connected)
+	a.rtsCB.SetEnabled(connected)
 }
 
 func (a *app) dtrChanged() {
@@ -447,6 +454,25 @@ func (a *app) updateEscapeState() {
 	if a.escapeCB != nil && a.hexTXCB != nil {
 		a.escapeCB.SetEnabled(!a.hexTXCB.Checked())
 	}
+}
+
+func (a *app) updateReceiveWrap() {
+	if a.wrapRXCB != nil {
+		setTextEditWrap(a.receiveTE, a.wrapRXCB.Checked())
+	}
+}
+
+func (a *app) updateSendWrap() {
+	if a.wrapTXCB != nil {
+		setTextEditWrap(a.sendTE, a.wrapTXCB.Checked())
+	}
+}
+
+func setTextEditWrap(te *wrapedit.Edit, wrap bool) {
+	if te == nil || te.Handle() == 0 {
+		return
+	}
+	te.SetWordWrap(wrap)
 }
 
 func (a *app) termModeChanged() {
@@ -585,7 +611,11 @@ func (a *app) loadSettings() {
 	a.rtsCB.SetChecked(config.LoadInt("RTS", 0) != 0)
 	a.autoReconnectCB.SetChecked(config.LoadInt("AutoReconnect", 1) != 0)
 	a.escapeCB.SetChecked(config.LoadInt("Escape", 0) != 0)
+	a.wrapRXCB.SetChecked(config.LoadInt("WrapRX", 1) != 0)
+	a.wrapTXCB.SetChecked(config.LoadInt("WrapTX", 1) != 0)
 	a.updateEscapeState()
+	a.updateReceiveWrap()
+	a.updateSendWrap()
 	a.termModeCB.SetChecked(config.LoadInt("TermMode", 0) != 0)
 }
 func (a *app) saveSettings() {
@@ -603,6 +633,8 @@ func (a *app) saveSettings() {
 	saveBool("RTS", a.rtsCB.Checked())
 	saveBool("AutoReconnect", a.autoReconnectCB.Checked())
 	saveBool("Escape", a.escapeCB.Checked())
+	saveBool("WrapRX", a.wrapRXCB.Checked())
+	saveBool("WrapTX", a.wrapTXCB.Checked())
 	saveBool("TermMode", a.termModeCB.Checked())
 }
 func setIndex(cb *walk.ComboBox, index int) {
