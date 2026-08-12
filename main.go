@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,7 @@ import (
 	"unicom/internal/wrapedit"
 )
 
-const appName = "UniCom 串口调试助手"
+const appName = "UniCom 通信调试助手"
 
 var (
 	VERSION    = "0.0.1"
@@ -34,19 +35,21 @@ var (
 )
 
 type app struct {
-	mw                                                                *walk.MainWindow
-	portCB, baudCB, dataCB, parityCB, stopCB, flowCB                  *walk.ComboBox
-	encodingCB, sendEncodingCB, lineEndingCB                          *walk.ComboBox
-	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                   *walk.PushButton
-	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB *walk.CheckBox
-	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB        *walk.CheckBox
-	receiveTE, sendTE                                                 *wrapedit.Edit
-	intervalLE                                                        *walk.LineEdit
-	statusItem, countersItem                                          *walk.StatusBarItem
-	receiveTools, sendPanel, terminalHost                             *walk.Composite
-	contentSplitter                                                   *walk.Splitter
-	terminal                                                          *terminalview.TerminalView
-	deviceWatcher                                                     *devicewatch.Watcher
+	mw                                                                 *walk.MainWindow
+	connectionTypeCB, portCB, baudCB, dataCB, parityCB, stopCB, flowCB *walk.ComboBox
+	encodingCB, sendEncodingCB, lineEndingCB                           *walk.ComboBox
+	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                    *walk.PushButton
+	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB  *walk.CheckBox
+	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB         *walk.CheckBox
+	receiveTE, sendTE                                                  *wrapedit.Edit
+	intervalLE                                                         *walk.LineEdit
+	tcpHostLE, tcpPortLE                                               *walk.LineEdit
+	statusItem, countersItem                                           *walk.StatusBarItem
+	receiveTools, sendPanel, terminalHost                              *walk.Composite
+	serialBasic, serialOptions, tcpBasic                               *walk.Composite
+	contentSplitter                                                    *walk.Splitter
+	terminal                                                           *terminalview.TerminalView
+	deviceWatcher                                                      *devicewatch.Watcher
 
 	manager            *connection.Manager
 	buffer             *session.Buffer
@@ -116,7 +119,7 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 		AssignTo: &a.mw, Title: appTitle, MinSize: Size{Width: 840, Height: 580}, Size: Size{Width: 1040, Height: 720},
 		Icon: windowIcon,
 		Font: Font{Family: "Microsoft YaHei UI", PointSize: 9}, Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 6},
-		StatusBarItems: []StatusBarItem{{AssignTo: &a.statusItem, Text: "串口已关闭", Width: 620}, {AssignTo: &a.countersItem, Text: "RX 0 B   TX 0 B", Width: 260}},
+		StatusBarItems: []StatusBarItem{{AssignTo: &a.statusItem, Text: "连接已关闭", Width: 620}, {AssignTo: &a.countersItem, Text: "RX 0 B   TX 0 B", Width: 260}},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
 				CheckBox{AssignTo: &a.termModeCB, Text: "终端模式", OnCheckedChanged: a.termModeChanged},
@@ -144,17 +147,37 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 				}},
 			}},
 			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-				Label{Text: "串口"}, ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
-				Label{Text: "波特率"}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}},
-				HSpacer{}, PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 92}, OnClicked: a.togglePort},
+			Composite{Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 7}, Children: []Widget{
+				Label{Text: "连接", Row: 0, Column: 0},
+				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
+				Composite{AssignTo: &a.serialBasic, Row: 0, Column: 2, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
+					Label{Text: "串口", Row: 0, Column: 0},
+					ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}, Row: 0, Column: 1},
+					PushButton{AssignTo: &a.refreshBtn, Text: "刷新", Row: 0, Column: 2, OnClicked: a.refreshPorts},
+					Label{Text: "波特率", Row: 0, Column: 3},
+					ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}, Row: 0, Column: 4},
+				}},
+				Composite{AssignTo: &a.tcpBasic, Visible: false, Row: 0, Column: 2, StretchFactor: 1, Layout: Grid{Columns: 4, MarginsZero: true, Spacing: 6}, Children: []Widget{
+					Label{Text: "服务器", Row: 0, Column: 0},
+					LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 160}, Row: 0, Column: 1, StretchFactor: 1},
+					Label{Text: "端口", Row: 0, Column: 2},
+					LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, Row: 0, Column: 3},
+				}},
+				CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true, Row: 0, Column: 3},
+				PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 104}, Row: 0, Column: 4, OnClicked: a.togglePort},
 			}},
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				Label{Text: "数据位"}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 55}},
-				Label{Text: "校验"}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, MinSize: Size{Width: 65}, MaxSize: Size{Width: 78}},
-				Label{Text: "停止位"}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 58}},
-				Label{Text: "流控"}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}, MinSize: Size{Width: 78}, MaxSize: Size{Width: 92}},
-				CheckBox{AssignTo: &a.dtrCB, Text: "DTR"}, CheckBox{AssignTo: &a.rtsCB, Text: "RTS"}, CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true}, HSpacer{},
+			Composite{AssignTo: &a.serialOptions, Layout: Grid{Columns: 12, MarginsZero: true, Spacing: 7}, Children: []Widget{
+				Label{Text: "数据位", Row: 0, Column: 0},
+				ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 55}, Row: 0, Column: 1},
+				Label{Text: "校验", Row: 0, Column: 2},
+				ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, MinSize: Size{Width: 65}, MaxSize: Size{Width: 78}, Row: 0, Column: 3},
+				Label{Text: "停止位", Row: 0, Column: 4},
+				ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 58}, Row: 0, Column: 5},
+				Label{Text: "流控", Row: 0, Column: 6},
+				ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}, MinSize: Size{Width: 78}, MaxSize: Size{Width: 92}, Row: 0, Column: 7},
+				CheckBox{AssignTo: &a.dtrCB, Text: "DTR", Row: 0, Column: 8},
+				CheckBox{AssignTo: &a.rtsCB, Text: "RTS", Row: 0, Column: 9},
+				HSpacer{Row: 0, Column: 10, ColumnSpan: 2},
 			}},
 		},
 	}.Create()
@@ -189,16 +212,48 @@ func (a *app) togglePort() {
 		a.manager.Close()
 		return
 	}
-	c, err := a.serialConfig()
-	if err != nil {
-		a.showError(err)
-		return
-	}
 	a.mu.Lock()
 	a.opening = true
 	a.mu.Unlock()
 	a.updateControls()
+	if a.isTCP() {
+		address, err := a.tcpAddress()
+		if err != nil {
+			a.mu.Lock()
+			a.opening = false
+			a.mu.Unlock()
+			a.updateControls()
+			a.showError(err)
+			return
+		}
+		a.manager.OpenTCP(address)
+		return
+	}
+	c, err := a.serialConfig()
+	if err != nil {
+		a.mu.Lock()
+		a.opening = false
+		a.mu.Unlock()
+		a.updateControls()
+		a.showError(err)
+		return
+	}
 	a.manager.Open(c)
+}
+
+func (a *app) isTCP() bool { return a.connectionTypeCB.CurrentIndex() == 1 }
+
+func (a *app) tcpAddress() (string, error) {
+	host := strings.TrimSpace(a.tcpHostLE.Text())
+	if host == "" {
+		return "", fmt.Errorf("服务器地址不能为空")
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(a.tcpPortLE.Text()))
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("TCP 端口必须在 1 到 65535 之间")
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func (a *app) onConnectionEvent(e connection.Event) {
@@ -400,6 +455,17 @@ func (a *app) refreshPorts() {
 		a.portCB.SetCurrentIndex(0)
 	}
 }
+
+func (a *app) connectionTypeChanged() {
+	if a.serialBasic == nil || a.tcpBasic == nil || a.serialOptions == nil {
+		return
+	}
+	tcp := a.isTCP()
+	a.serialBasic.SetVisible(!tcp)
+	a.serialOptions.SetVisible(!tcp)
+	a.tcpBasic.SetVisible(tcp)
+	a.updateControls()
+}
 func (a *app) clearReceive() {
 	a.buffer.Clear()
 	a.pending = a.pending[:0]
@@ -439,14 +505,21 @@ func (a *app) updateControls() {
 	a.mu.Lock()
 	opening, connected := a.opening, a.connected
 	a.mu.Unlock()
-	a.openBtn.SetText(map[bool]string{true: "关闭串口", false: "打开串口"}[opening])
+	mode := "串口"
+	if a.isTCP() {
+		mode = "TCP 客户端"
+	}
+	a.openBtn.SetText(map[bool]string{true: "关闭" + mode, false: "打开" + mode}[opening])
 	a.sendBtn.SetEnabled(connected)
-	a.refreshBtn.SetEnabled(!opening)
+	a.connectionTypeCB.SetEnabled(!opening)
+	a.refreshBtn.SetEnabled(!opening && !a.isTCP())
 	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
 	}
-	a.dtrCB.SetEnabled(connected)
-	a.rtsCB.SetEnabled(connected)
+	a.tcpHostLE.SetEnabled(!opening)
+	a.tcpPortLE.SetEnabled(!opening)
+	a.dtrCB.SetEnabled(connected && !a.isTCP())
+	a.rtsCB.SetEnabled(connected && !a.isTCP())
 }
 
 func (a *app) dtrChanged() {
@@ -515,7 +588,7 @@ func (a *app) termModeChanged() {
 
 func (a *app) termSendBytes(p []byte) error {
 	if a.manager == nil {
-		return fmt.Errorf("串口未连接")
+		return fmt.Errorf("连接未建立")
 	}
 	err := a.manager.Write(p)
 	if err != nil && a.statusItem != nil {
@@ -613,7 +686,10 @@ func (a *app) showError(err error) {
 }
 
 func (a *app) loadSettings() {
+	setIndex(a.connectionTypeCB, config.LoadInt("ConnectionType", 0))
 	a.portCB.SetText(config.Load("Port", "COM1"))
+	a.tcpHostLE.SetText(config.Load("TCPHost", "127.0.0.1"))
+	a.tcpPortLE.SetText(config.Load("TCPPort", "8080"))
 	a.baudCB.SetText(config.Load("Baud", "115200"))
 	setIndex(a.dataCB, config.LoadInt("DataBits", 3))
 	setIndex(a.parityCB, config.LoadInt("Parity", 0))
@@ -633,9 +709,13 @@ func (a *app) loadSettings() {
 	a.updateReceiveWrap()
 	a.updateSendWrap()
 	a.termModeCB.SetChecked(config.LoadInt("TermMode", 0) != 0)
+	a.connectionTypeChanged()
 }
 func (a *app) saveSettings() {
+	config.SaveInt("ConnectionType", a.connectionTypeCB.CurrentIndex())
 	config.Save("Port", a.portCB.Text())
+	config.Save("TCPHost", a.tcpHostLE.Text())
+	config.Save("TCPPort", a.tcpPortLE.Text())
 	config.Save("Baud", a.baudCB.Text())
 	config.SaveInt("DataBits", a.dataCB.CurrentIndex())
 	config.SaveInt("Parity", a.parityCB.CurrentIndex())

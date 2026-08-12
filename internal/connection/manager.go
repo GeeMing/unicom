@@ -3,9 +3,14 @@
 package connection
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
+	"time"
 
 	"unicom/internal/serialwin"
 )
@@ -26,11 +31,16 @@ type Event struct {
 
 type Manager struct {
 	mu         sync.Mutex
-	port       *serialwin.Port
+	writeMu    sync.Mutex
+	connection io.ReadWriteCloser
+	serialPort *serialwin.Port
 	config     serialwin.Config
+	tcpAddress string
+	mode       string
 	wanted     bool
 	present    bool
 	generation uint64
+	cancel     context.CancelFunc
 	wake       chan struct{}
 	wg         sync.WaitGroup
 	onData     func([]byte)
@@ -53,24 +63,53 @@ func (m *Manager) Open(c serialwin.Config) {
 
 	m.mu.Lock()
 	m.config = c
+	m.mode = "serial"
+	m.tcpAddress = ""
 	m.wanted = true
 	m.present = serialwin.Exists(c.Name)
 	m.generation++
 	gen := m.generation
 	m.wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	m.mu.Unlock()
 
-	go m.connectLoop(gen)
+	go m.connectLoop(ctx, gen)
+}
+
+func (m *Manager) OpenTCP(address string) {
+	m.stopCurrent()
+	m.drainSignal()
+
+	m.mu.Lock()
+	m.mode = "tcp"
+	m.tcpAddress = address
+	m.wanted = true
+	m.present = false
+	m.generation++
+	gen := m.generation
+	m.wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.mu.Unlock()
+
+	go m.connectLoop(ctx, gen)
 }
 
 func (m *Manager) stopCurrent() {
 	m.mu.Lock()
 	m.wanted = false
 	m.generation++
-	p := m.port
-	m.port = nil
+	p := m.connection
+	cancel := m.cancel
+	m.cancel = nil
+	m.connection = nil
+	m.serialPort = nil
 	m.mu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
 	if p != nil {
 		_ = p.Close()
 	}
@@ -78,7 +117,7 @@ func (m *Manager) stopCurrent() {
 	m.wg.Wait()
 }
 
-func (m *Manager) connectLoop(gen uint64) {
+func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 	defer m.wg.Done()
 
 	for {
@@ -88,7 +127,16 @@ func (m *Manager) connectLoop(gen uint64) {
 			return
 		}
 		c := m.config
+		mode := m.mode
+		tcpAddress := m.tcpAddress
 		m.mu.Unlock()
+
+		if mode == "tcp" {
+			if !m.connectTCP(ctx, gen, tcpAddress) {
+				return
+			}
+			continue
+		}
 
 		if !serialwin.Exists(c.Name) {
 			m.setPresent(false)
@@ -116,14 +164,16 @@ func (m *Manager) connectLoop(gen uint64) {
 			_ = p.Close()
 			return
 		}
-		m.port = p
+		m.connection = p
+		m.serialPort = p
 		m.mu.Unlock()
 		m.emit(Event{StateConnected, c.Name + " 已连接"})
 
 		err = m.readLoop(gen, p)
 		m.mu.Lock()
-		if m.port == p {
-			m.port = nil
+		if m.connection == p {
+			m.connection = nil
+			m.serialPort = nil
 		}
 		wanted := m.wanted && gen == m.generation
 		m.mu.Unlock()
@@ -139,7 +189,45 @@ func (m *Manager) connectLoop(gen uint64) {
 	}
 }
 
-func (m *Manager) readLoop(gen uint64, p *serialwin.Port) error {
+func (m *Manager) connectTCP(ctx context.Context, gen uint64, address string) bool {
+	m.emit(Event{StateConnecting, "正在连接 " + address + "..."})
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	c, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		m.emit(Event{StateWaiting, fmt.Sprintf("TCP 连接失败: %v；2 秒后重试", err)})
+		return m.waitRetry(gen, 2*time.Second)
+	}
+
+	m.mu.Lock()
+	if !m.wanted || gen != m.generation {
+		m.mu.Unlock()
+		_ = c.Close()
+		return false
+	}
+	m.connection = c
+	m.serialPort = nil
+	m.mu.Unlock()
+	m.emit(Event{StateConnected, address + " 已连接"})
+
+	err = m.readLoop(gen, c)
+	m.mu.Lock()
+	if m.connection == c {
+		m.connection = nil
+	}
+	wanted := m.wanted && gen == m.generation
+	m.mu.Unlock()
+	_ = c.Close()
+	if !wanted {
+		return false
+	}
+	m.emit(Event{StateWaiting, fmt.Sprintf("TCP 连接中断: %v；2 秒后重试", err)})
+	return m.waitRetry(gen, 2*time.Second)
+}
+
+func (m *Manager) readLoop(gen uint64, p io.ReadWriteCloser) error {
 	buf := make([]byte, 8192)
 	for {
 		n, err := p.Read(buf)
@@ -153,12 +241,29 @@ func (m *Manager) readLoop(gen uint64, p *serialwin.Port) error {
 		}
 
 		m.mu.Lock()
-		active := m.wanted && gen == m.generation && m.port == p
+		active := m.wanted && gen == m.generation && m.connection == p
+		mode := m.mode
 		m.mu.Unlock()
 		if !active {
+			if mode == "tcp" {
+				return errors.New("TCP 连接已关闭")
+			}
 			return errors.New("串口已关闭")
 		}
 	}
+}
+
+func (m *Manager) waitRetry(gen uint64, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-m.wake:
+	}
+	m.mu.Lock()
+	active := m.wanted && gen == m.generation
+	m.mu.Unlock()
+	return active
 }
 
 func (m *Manager) waitForDevice(gen uint64) bool {
@@ -186,9 +291,13 @@ func (m *Manager) DeviceChanged() {
 		return
 	}
 	c := m.config
+	mode := m.mode
 	wasPresent := m.present
 	m.mu.Unlock()
 
+	if mode != "serial" {
+		return
+	}
 	present := serialwin.Exists(c.Name)
 	if present == wasPresent {
 		return
@@ -200,7 +309,7 @@ func (m *Manager) DeviceChanged() {
 		return
 	}
 	m.present = present
-	p := m.port
+	p := m.connection
 	m.mu.Unlock()
 
 	// Release the handle immediately on removal so Windows can reuse the COM
@@ -232,36 +341,50 @@ func (m *Manager) drainSignal() {
 }
 
 func (m *Manager) Close() {
+	m.mu.Lock()
+	mode := m.mode
+	m.mu.Unlock()
 	m.stopCurrent()
-	m.emit(Event{StateClosed, "串口已关闭"})
+	if mode == "tcp" {
+		m.emit(Event{StateClosed, "TCP 客户端已关闭"})
+	} else {
+		m.emit(Event{StateClosed, "串口已关闭"})
+	}
 }
 
 func (m *Manager) Write(data []byte) error {
 	m.mu.Lock()
-	p := m.port
+	p := m.connection
 	wanted := m.wanted
+	mode := m.mode
 	m.mu.Unlock()
 	if !wanted || p == nil {
-		return errors.New("串口未连接")
+		return errors.New("连接未建立")
 	}
 
-	n, err := p.Write(data)
+	m.writeMu.Lock()
+	n, err := io.Copy(p, bytes.NewReader(data))
+	m.writeMu.Unlock()
 	if n > 0 && m.onTX != nil {
-		m.onTX(n)
+		m.onTX(int(n))
 	}
 	if err != nil {
 		_ = p.Close()
 		return err
 	}
-	if n != len(data) {
-		return errors.New("串口只发送了部分数据")
+	if n != int64(len(data)) {
+		name := "串口"
+		if mode == "tcp" {
+			name = "TCP"
+		}
+		return fmt.Errorf("%s 只发送了部分数据", name)
 	}
 	return nil
 }
 
 func (m *Manager) SetDTR(enabled bool) error {
 	m.mu.Lock()
-	p := m.port
+	p := m.serialPort
 	m.config.DTR = enabled
 	m.mu.Unlock()
 	if p == nil {
@@ -272,7 +395,7 @@ func (m *Manager) SetDTR(enabled bool) error {
 
 func (m *Manager) SetRTS(enabled bool) error {
 	m.mu.Lock()
-	p := m.port
+	p := m.serialPort
 	m.config.RTS = enabled
 	m.mu.Unlock()
 	if p == nil {
@@ -284,7 +407,7 @@ func (m *Manager) SetRTS(enabled bool) error {
 func (m *Manager) Connected() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.port != nil
+	return m.connection != nil
 }
 
 func (m *Manager) emit(e Event) {
