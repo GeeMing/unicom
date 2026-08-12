@@ -149,7 +149,7 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
 			Composite{Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 7}, Children: []Widget{
 				Label{Text: "连接", Row: 0, Column: 0},
-				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
+				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "UDP 客户端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
 				Composite{AssignTo: &a.serialBasic, Row: 0, Column: 2, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
 					Label{Text: "串口", Row: 0, Column: 0},
 					ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}, Row: 0, Column: 1},
@@ -216,8 +216,8 @@ func (a *app) togglePort() {
 	a.opening = true
 	a.mu.Unlock()
 	a.updateControls()
-	if a.isTCP() {
-		address, err := a.tcpAddress()
+	if a.isNetwork() {
+		address, err := a.networkAddress()
 		if err != nil {
 			a.mu.Lock()
 			a.opening = false
@@ -226,7 +226,11 @@ func (a *app) togglePort() {
 			a.showError(err)
 			return
 		}
-		a.manager.OpenTCP(address)
+		if a.isUDP() {
+			a.manager.OpenUDP(address)
+		} else {
+			a.manager.OpenTCP(address)
+		}
 		return
 	}
 	c, err := a.serialConfig()
@@ -241,16 +245,18 @@ func (a *app) togglePort() {
 	a.manager.Open(c)
 }
 
-func (a *app) isTCP() bool { return a.connectionTypeCB.CurrentIndex() == 1 }
+func (a *app) isTCP() bool     { return a.connectionTypeCB.CurrentIndex() == 1 }
+func (a *app) isUDP() bool     { return a.connectionTypeCB.CurrentIndex() == 2 }
+func (a *app) isNetwork() bool { return a.isTCP() || a.isUDP() }
 
-func (a *app) tcpAddress() (string, error) {
+func (a *app) networkAddress() (string, error) {
 	host := strings.TrimSpace(a.tcpHostLE.Text())
 	if host == "" {
 		return "", fmt.Errorf("服务器地址不能为空")
 	}
 	port, err := strconv.Atoi(strings.TrimSpace(a.tcpPortLE.Text()))
 	if err != nil || port < 1 || port > 65535 {
-		return "", fmt.Errorf("TCP 端口必须在 1 到 65535 之间")
+		return "", fmt.Errorf("端口必须在 1 到 65535 之间")
 	}
 	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
@@ -460,10 +466,10 @@ func (a *app) connectionTypeChanged() {
 	if a.serialBasic == nil || a.tcpBasic == nil || a.serialOptions == nil {
 		return
 	}
-	tcp := a.isTCP()
-	a.serialBasic.SetVisible(!tcp)
-	a.serialOptions.SetVisible(!tcp)
-	a.tcpBasic.SetVisible(tcp)
+	network := a.isNetwork()
+	a.serialBasic.SetVisible(!network)
+	a.serialOptions.SetVisible(!network)
+	a.tcpBasic.SetVisible(network)
 	a.updateControls()
 }
 func (a *app) clearReceive() {
@@ -508,18 +514,20 @@ func (a *app) updateControls() {
 	mode := "串口"
 	if a.isTCP() {
 		mode = "TCP 客户端"
+	} else if a.isUDP() {
+		mode = "UDP 客户端"
 	}
 	a.openBtn.SetText(map[bool]string{true: "关闭" + mode, false: "打开" + mode}[opening])
 	a.sendBtn.SetEnabled(connected)
 	a.connectionTypeCB.SetEnabled(!opening)
-	a.refreshBtn.SetEnabled(!opening && !a.isTCP())
+	a.refreshBtn.SetEnabled(!opening && !a.isNetwork())
 	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
 	}
 	a.tcpHostLE.SetEnabled(!opening)
 	a.tcpPortLE.SetEnabled(!opening)
-	a.dtrCB.SetEnabled(connected && !a.isTCP())
-	a.rtsCB.SetEnabled(connected && !a.isTCP())
+	a.dtrCB.SetEnabled(connected && !a.isNetwork())
+	a.rtsCB.SetEnabled(connected && !a.isNetwork())
 }
 
 func (a *app) dtrChanged() {

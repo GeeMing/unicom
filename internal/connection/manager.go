@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,11 +79,19 @@ func (m *Manager) Open(c serialwin.Config) {
 }
 
 func (m *Manager) OpenTCP(address string) {
+	m.openNetwork("tcp", address)
+}
+
+func (m *Manager) OpenUDP(address string) {
+	m.openNetwork("udp", address)
+}
+
+func (m *Manager) openNetwork(mode, address string) {
 	m.stopCurrent()
 	m.drainSignal()
 
 	m.mu.Lock()
-	m.mode = "tcp"
+	m.mode = mode
 	m.tcpAddress = address
 	m.wanted = true
 	m.present = false
@@ -131,8 +140,8 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 		tcpAddress := m.tcpAddress
 		m.mu.Unlock()
 
-		if mode == "tcp" {
-			if !m.connectTCP(ctx, gen, tcpAddress) {
+		if mode == "tcp" || mode == "udp" {
+			if !m.connectNetwork(ctx, gen, mode, tcpAddress) {
 				return
 			}
 			continue
@@ -189,15 +198,16 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 	}
 }
 
-func (m *Manager) connectTCP(ctx context.Context, gen uint64, address string) bool {
-	m.emit(Event{StateConnecting, "正在连接 " + address + "..."})
+func (m *Manager) connectNetwork(ctx context.Context, gen uint64, mode, address string) bool {
+	protocol := strings.ToUpper(mode)
+	m.emit(Event{StateConnecting, protocol + " 正在连接 " + address + "..."})
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	c, err := dialer.DialContext(ctx, "tcp", address)
+	c, err := dialer.DialContext(ctx, mode, address)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false
 		}
-		m.emit(Event{StateWaiting, fmt.Sprintf("TCP 连接失败: %v；2 秒后重试", err)})
+		m.emit(Event{StateWaiting, fmt.Sprintf("%s 连接失败: %v；2 秒后重试", protocol, err)})
 		return m.waitRetry(gen, 2*time.Second)
 	}
 
@@ -210,7 +220,7 @@ func (m *Manager) connectTCP(ctx context.Context, gen uint64, address string) bo
 	m.connection = c
 	m.serialPort = nil
 	m.mu.Unlock()
-	m.emit(Event{StateConnected, address + " 已连接"})
+	m.emit(Event{StateConnected, protocol + " " + address + " 已连接"})
 
 	err = m.readLoop(gen, c)
 	m.mu.Lock()
@@ -223,7 +233,7 @@ func (m *Manager) connectTCP(ctx context.Context, gen uint64, address string) bo
 	if !wanted {
 		return false
 	}
-	m.emit(Event{StateWaiting, fmt.Sprintf("TCP 连接中断: %v；2 秒后重试", err)})
+	m.emit(Event{StateWaiting, fmt.Sprintf("%s 连接中断: %v；2 秒后重试", protocol, err)})
 	return m.waitRetry(gen, 2*time.Second)
 }
 
@@ -245,8 +255,8 @@ func (m *Manager) readLoop(gen uint64, p io.ReadWriteCloser) error {
 		mode := m.mode
 		m.mu.Unlock()
 		if !active {
-			if mode == "tcp" {
-				return errors.New("TCP 连接已关闭")
+			if mode == "tcp" || mode == "udp" {
+				return fmt.Errorf("%s 连接已关闭", strings.ToUpper(mode))
 			}
 			return errors.New("串口已关闭")
 		}
@@ -345,8 +355,8 @@ func (m *Manager) Close() {
 	mode := m.mode
 	m.mu.Unlock()
 	m.stopCurrent()
-	if mode == "tcp" {
-		m.emit(Event{StateClosed, "TCP 客户端已关闭"})
+	if mode == "tcp" || mode == "udp" {
+		m.emit(Event{StateClosed, strings.ToUpper(mode) + " 客户端已关闭"})
 	} else {
 		m.emit(Event{StateClosed, "串口已关闭"})
 	}
@@ -374,8 +384,8 @@ func (m *Manager) Write(data []byte) error {
 	}
 	if n != int64(len(data)) {
 		name := "串口"
-		if mode == "tcp" {
-			name = "TCP"
+		if mode == "tcp" || mode == "udp" {
+			name = strings.ToUpper(mode)
 		}
 		return fmt.Errorf("%s 只发送了部分数据", name)
 	}
