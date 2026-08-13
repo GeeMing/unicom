@@ -34,10 +34,12 @@ type Manager struct {
 	mu               sync.Mutex
 	writeMu          sync.Mutex
 	connection       io.ReadWriteCloser
+	listener         net.Listener
 	serialPort       *serialwin.Port
 	config           serialwin.Config
 	tcpLocalAddress  string
 	tcpAddress       string
+	tcpServerAddress string
 	udpLocalAddress  string
 	udpRemoteAddress string
 	mode             string
@@ -70,6 +72,7 @@ func (m *Manager) Open(c serialwin.Config) {
 	m.mode = "serial"
 	m.tcpLocalAddress = ""
 	m.tcpAddress = ""
+	m.tcpServerAddress = ""
 	m.udpLocalAddress = ""
 	m.udpRemoteAddress = ""
 	m.wanted = true
@@ -88,6 +91,29 @@ func (m *Manager) OpenTCP(localAddress, address string) {
 	m.openNetwork("tcp", localAddress, address)
 }
 
+func (m *Manager) OpenTCPServer(address string) {
+	m.stopCurrent()
+	m.drainSignal()
+
+	m.mu.Lock()
+	m.mode = "tcp-server"
+	m.tcpLocalAddress = ""
+	m.tcpAddress = ""
+	m.tcpServerAddress = address
+	m.udpLocalAddress = ""
+	m.udpRemoteAddress = ""
+	m.wanted = true
+	m.present = false
+	m.generation++
+	gen := m.generation
+	m.wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.mu.Unlock()
+
+	go m.connectLoop(ctx, gen)
+}
+
 func (m *Manager) OpenUDP(localAddress, remoteAddress string) {
 	m.stopCurrent()
 	m.drainSignal()
@@ -96,6 +122,7 @@ func (m *Manager) OpenUDP(localAddress, remoteAddress string) {
 	m.mode = "udp"
 	m.tcpLocalAddress = ""
 	m.tcpAddress = ""
+	m.tcpServerAddress = ""
 	m.udpLocalAddress = localAddress
 	m.udpRemoteAddress = remoteAddress
 	m.wanted = true
@@ -118,6 +145,7 @@ func (m *Manager) openNetwork(mode, localAddress, address string) {
 	m.mode = mode
 	m.tcpLocalAddress = localAddress
 	m.tcpAddress = address
+	m.tcpServerAddress = ""
 	m.udpLocalAddress = ""
 	m.udpRemoteAddress = ""
 	m.wanted = true
@@ -137,9 +165,11 @@ func (m *Manager) stopCurrent() {
 	m.wanted = false
 	m.generation++
 	p := m.connection
+	listener := m.listener
 	cancel := m.cancel
 	m.cancel = nil
 	m.connection = nil
+	m.listener = nil
 	m.serialPort = nil
 	m.mu.Unlock()
 
@@ -148,6 +178,9 @@ func (m *Manager) stopCurrent() {
 	}
 	if p != nil {
 		_ = p.Close()
+	}
+	if listener != nil {
+		_ = listener.Close()
 	}
 	m.signal()
 	m.wg.Wait()
@@ -166,10 +199,15 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 		mode := m.mode
 		tcpLocalAddress := m.tcpLocalAddress
 		tcpAddress := m.tcpAddress
+		tcpServerAddress := m.tcpServerAddress
 		udpLocalAddress := m.udpLocalAddress
 		udpRemoteAddress := m.udpRemoteAddress
 		m.mu.Unlock()
 
+		if mode == "tcp-server" {
+			m.runTCPServer(ctx, gen, tcpServerAddress)
+			return
+		}
 		if mode == "udp" {
 			if !m.connectUDP(ctx, gen, udpLocalAddress, udpRemoteAddress) {
 				return
@@ -231,6 +269,69 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 		if !m.waitForDevice(gen) {
 			return
 		}
+	}
+}
+
+func (m *Manager) runTCPServer(ctx context.Context, gen uint64, address string) {
+	m.emit(Event{StateConnecting, "TCP 服务端正在监听 " + address + "..."})
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		if ctx.Err() == nil {
+			m.emit(Event{StateClosed, fmt.Sprintf("TCP 服务端监听失败: %v", err)})
+		}
+		return
+	}
+
+	m.mu.Lock()
+	if !m.wanted || gen != m.generation {
+		m.mu.Unlock()
+		_ = listener.Close()
+		return
+	}
+	m.listener = listener
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.listener == listener {
+			m.listener = nil
+		}
+		m.mu.Unlock()
+		_ = listener.Close()
+	}()
+
+	for {
+		m.emit(Event{StateWaiting, "TCP 服务端正在监听 " + listener.Addr().String() + "，等待客户端"})
+		c, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() == nil {
+				m.emit(Event{StateClosed, fmt.Sprintf("TCP 服务端监听已中断: %v", err)})
+			}
+			return
+		}
+
+		m.mu.Lock()
+		if !m.wanted || gen != m.generation {
+			m.mu.Unlock()
+			_ = c.Close()
+			return
+		}
+		m.connection = c
+		m.serialPort = nil
+		m.mu.Unlock()
+		m.emit(Event{StateConnected, "TCP 客户端 " + c.RemoteAddr().String() + " 已连接"})
+
+		err = m.readLoop(gen, c)
+		m.mu.Lock()
+		if m.connection == c {
+			m.connection = nil
+		}
+		active := m.wanted && gen == m.generation
+		m.mu.Unlock()
+		_ = c.Close()
+		if !active {
+			return
+		}
+		m.emit(Event{StateWaiting, fmt.Sprintf("TCP 客户端已断开: %v", err)})
 	}
 }
 
@@ -353,7 +454,7 @@ func (m *Manager) readLoop(gen uint64, p io.ReadWriteCloser) error {
 		mode := m.mode
 		m.mu.Unlock()
 		if !active {
-			if mode == "tcp" || mode == "udp" {
+			if mode == "tcp" || mode == "udp" || mode == "tcp-server" {
 				return fmt.Errorf("%s 连接已关闭", strings.ToUpper(mode))
 			}
 			return errors.New("串口已关闭")
@@ -453,7 +554,9 @@ func (m *Manager) Close() {
 	mode := m.mode
 	m.mu.Unlock()
 	m.stopCurrent()
-	if mode == "tcp" || mode == "udp" {
+	if mode == "tcp-server" {
+		m.emit(Event{StateClosed, "TCP 服务端已关闭"})
+	} else if mode == "tcp" || mode == "udp" {
 		m.emit(Event{StateClosed, strings.ToUpper(mode) + " 客户端已关闭"})
 	} else {
 		m.emit(Event{StateClosed, "串口已关闭"})
@@ -482,7 +585,7 @@ func (m *Manager) Write(data []byte) error {
 	}
 	if n != int64(len(data)) {
 		name := "串口"
-		if mode == "tcp" || mode == "udp" {
+		if mode == "tcp" || mode == "udp" || mode == "tcp-server" {
 			name = strings.ToUpper(mode)
 		}
 		return fmt.Errorf("%s 只发送了部分数据", name)
