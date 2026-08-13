@@ -31,22 +31,25 @@ type Event struct {
 }
 
 type Manager struct {
-	mu         sync.Mutex
-	writeMu    sync.Mutex
-	connection io.ReadWriteCloser
-	serialPort *serialwin.Port
-	config     serialwin.Config
-	tcpAddress string
-	mode       string
-	wanted     bool
-	present    bool
-	generation uint64
-	cancel     context.CancelFunc
-	wake       chan struct{}
-	wg         sync.WaitGroup
-	onData     func([]byte)
-	onEvent    func(Event)
-	onTX       func(int)
+	mu               sync.Mutex
+	writeMu          sync.Mutex
+	connection       io.ReadWriteCloser
+	serialPort       *serialwin.Port
+	config           serialwin.Config
+	tcpLocalAddress  string
+	tcpAddress       string
+	udpLocalAddress  string
+	udpRemoteAddress string
+	mode             string
+	wanted           bool
+	present          bool
+	generation       uint64
+	cancel           context.CancelFunc
+	wake             chan struct{}
+	wg               sync.WaitGroup
+	onData           func([]byte)
+	onEvent          func(Event)
+	onTX             func(int)
 }
 
 func New(onData func([]byte), onEvent func(Event), onTX func(int)) *Manager {
@@ -65,7 +68,10 @@ func (m *Manager) Open(c serialwin.Config) {
 	m.mu.Lock()
 	m.config = c
 	m.mode = "serial"
+	m.tcpLocalAddress = ""
 	m.tcpAddress = ""
+	m.udpLocalAddress = ""
+	m.udpRemoteAddress = ""
 	m.wanted = true
 	m.present = serialwin.Exists(c.Name)
 	m.generation++
@@ -78,21 +84,42 @@ func (m *Manager) Open(c serialwin.Config) {
 	go m.connectLoop(ctx, gen)
 }
 
-func (m *Manager) OpenTCP(address string) {
-	m.openNetwork("tcp", address)
+func (m *Manager) OpenTCP(localAddress, address string) {
+	m.openNetwork("tcp", localAddress, address)
 }
 
-func (m *Manager) OpenUDP(address string) {
-	m.openNetwork("udp", address)
+func (m *Manager) OpenUDP(localAddress, remoteAddress string) {
+	m.stopCurrent()
+	m.drainSignal()
+
+	m.mu.Lock()
+	m.mode = "udp"
+	m.tcpLocalAddress = ""
+	m.tcpAddress = ""
+	m.udpLocalAddress = localAddress
+	m.udpRemoteAddress = remoteAddress
+	m.wanted = true
+	m.present = false
+	m.generation++
+	gen := m.generation
+	m.wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.mu.Unlock()
+
+	go m.connectLoop(ctx, gen)
 }
 
-func (m *Manager) openNetwork(mode, address string) {
+func (m *Manager) openNetwork(mode, localAddress, address string) {
 	m.stopCurrent()
 	m.drainSignal()
 
 	m.mu.Lock()
 	m.mode = mode
+	m.tcpLocalAddress = localAddress
 	m.tcpAddress = address
+	m.udpLocalAddress = ""
+	m.udpRemoteAddress = ""
 	m.wanted = true
 	m.present = false
 	m.generation++
@@ -137,11 +164,20 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 		}
 		c := m.config
 		mode := m.mode
+		tcpLocalAddress := m.tcpLocalAddress
 		tcpAddress := m.tcpAddress
+		udpLocalAddress := m.udpLocalAddress
+		udpRemoteAddress := m.udpRemoteAddress
 		m.mu.Unlock()
 
-		if mode == "tcp" || mode == "udp" {
-			if !m.connectNetwork(ctx, gen, mode, tcpAddress) {
+		if mode == "udp" {
+			if !m.connectUDP(ctx, gen, udpLocalAddress, udpRemoteAddress) {
+				return
+			}
+			continue
+		}
+		if mode == "tcp" {
+			if !m.connectNetwork(ctx, gen, mode, tcpLocalAddress, tcpAddress) {
 				return
 			}
 			continue
@@ -198,10 +234,72 @@ func (m *Manager) connectLoop(ctx context.Context, gen uint64) {
 	}
 }
 
-func (m *Manager) connectNetwork(ctx context.Context, gen uint64, mode, address string) bool {
+func (m *Manager) connectUDP(ctx context.Context, gen uint64, localAddress, remoteAddress string) bool {
+	localDescription := "系统自动分配"
+	var local *net.UDPAddr
+	var err error
+	if localAddress != "" {
+		localDescription = localAddress
+		local, err = net.ResolveUDPAddr("udp", localAddress)
+	}
+	m.emit(Event{StateConnecting, "UDP 本地 " + localDescription + "，对端 " + remoteAddress + "..."})
+	if err == nil {
+		var remote *net.UDPAddr
+		remote, err = net.ResolveUDPAddr("udp", remoteAddress)
+		if err == nil {
+			var c *net.UDPConn
+			c, err = net.DialUDP("udp", local, remote)
+			if err == nil {
+				return m.useUDPConnection(ctx, gen, c, localAddress, remoteAddress)
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	m.emit(Event{StateWaiting, fmt.Sprintf("UDP 打开失败: %v；2 秒后重试", err)})
+	return m.waitRetry(gen, 2*time.Second)
+}
+
+func (m *Manager) useUDPConnection(ctx context.Context, gen uint64, c *net.UDPConn, localAddress, remoteAddress string) bool {
+	m.mu.Lock()
+	if !m.wanted || gen != m.generation {
+		m.mu.Unlock()
+		_ = c.Close()
+		return false
+	}
+	m.connection = c
+	m.serialPort = nil
+	m.mu.Unlock()
+	m.emit(Event{StateConnected, "UDP 本地 " + c.LocalAddr().String() + "，对端 " + remoteAddress})
+
+	err := m.readLoop(gen, c)
+	m.mu.Lock()
+	if m.connection == c {
+		m.connection = nil
+	}
+	wanted := m.wanted && gen == m.generation
+	m.mu.Unlock()
+	_ = c.Close()
+	if !wanted || ctx.Err() != nil {
+		return false
+	}
+	m.emit(Event{StateWaiting, fmt.Sprintf("UDP 连接中断: %v；2 秒后重试", err)})
+	return m.waitRetry(gen, 2*time.Second)
+}
+
+func (m *Manager) connectNetwork(ctx context.Context, gen uint64, mode, localAddress, address string) bool {
 	protocol := strings.ToUpper(mode)
 	m.emit(Event{StateConnecting, protocol + " 正在连接 " + address + "..."})
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	if localAddress != "" {
+		local, err := net.ResolveTCPAddr("tcp", localAddress)
+		if err != nil {
+			m.emit(Event{StateWaiting, fmt.Sprintf("%s 本地地址无效: %v；2 秒后重试", protocol, err)})
+			return m.waitRetry(gen, 2*time.Second)
+		}
+		dialer.LocalAddr = local
+	}
 	c, err := dialer.DialContext(ctx, mode, address)
 	if err != nil {
 		if ctx.Err() != nil {

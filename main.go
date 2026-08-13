@@ -42,12 +42,14 @@ type app struct {
 	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                    *walk.PushButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB  *walk.CheckBox
 	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB         *walk.CheckBox
+	tcpBindLocalCB, udpBindLocalCB                                     *walk.CheckBox
 	receiveTE, sendTE                                                  *wrapedit.Edit
 	intervalLE                                                         *walk.LineEdit
-	tcpHostLE, tcpPortLE                                               *walk.LineEdit
+	tcpHostLE, tcpPortLE, tcpLocalHostLE, tcpLocalPortLE               *walk.LineEdit
+	udpLocalHostLE, udpLocalPortLE, udpRemoteHostLE, udpRemotePortLE   *walk.LineEdit
 	statusItem, countersItem                                           *walk.StatusBarItem
 	receiveTools, sendPanel, terminalHost                              *walk.Composite
-	serialBasic, serialOptions, tcpBasic                               *walk.Composite
+	serialBasic, serialOptions, tcpBasic, udpBasic                     *walk.Composite
 	contentSplitter                                                    *walk.Splitter
 	terminal                                                           *terminalview.TerminalView
 	deviceWatcher                                                      *devicewatch.Watcher
@@ -150,7 +152,7 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
 			Composite{Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 7}, Children: []Widget{
 				Label{Text: "连接", Row: 0, Column: 0},
-				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "UDP 客户端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
+				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "UDP"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
 				Composite{Row: 0, Column: 2, StretchFactor: 1, Layout: HBox{MarginsZero: true}, Children: []Widget{
 					Composite{AssignTo: &a.serialBasic, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
 						Label{Text: "串口", Row: 0, Column: 0},
@@ -159,11 +161,27 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 						Label{Text: "波特率", Row: 0, Column: 3},
 						ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}, Row: 0, Column: 4},
 					}},
-					Composite{AssignTo: &a.tcpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 4, MarginsZero: true, Spacing: 6}, Children: []Widget{
+					Composite{AssignTo: &a.tcpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
 						Label{Text: "服务器", Row: 0, Column: 0},
-						LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 160}, Row: 0, Column: 1, StretchFactor: 1},
+						LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 120}, Row: 0, Column: 1, StretchFactor: 1},
 						Label{Text: "端口", Row: 0, Column: 2},
-						LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, Row: 0, Column: 3},
+						LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 0, Column: 3},
+						CheckBox{AssignTo: &a.tcpBindLocalCB, Text: "指定本地地址", Row: 1, Column: 0, OnCheckedChanged: a.updateControls},
+						LineEdit{AssignTo: &a.tcpLocalHostLE, Text: "0.0.0.0", MinSize: Size{Width: 120}, Row: 1, Column: 1, StretchFactor: 1},
+						Label{Text: "端口", Row: 1, Column: 2},
+						LineEdit{AssignTo: &a.tcpLocalPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 1, Column: 3},
+						HSpacer{Row: 0, Column: 4, RowSpan: 2},
+					}},
+					Composite{AssignTo: &a.udpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
+						Label{Text: "对端 IP", Row: 0, Column: 0},
+						LineEdit{AssignTo: &a.udpRemoteHostLE, Text: "127.0.0.1", MinSize: Size{Width: 120}, Row: 0, Column: 1, StretchFactor: 1},
+						Label{Text: "端口", Row: 0, Column: 2},
+						LineEdit{AssignTo: &a.udpRemotePortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 0, Column: 3},
+						CheckBox{AssignTo: &a.udpBindLocalCB, Text: "指定本地地址", Row: 1, Column: 0, OnCheckedChanged: a.updateControls},
+						LineEdit{AssignTo: &a.udpLocalHostLE, Text: "0.0.0.0", MinSize: Size{Width: 120}, Row: 1, Column: 1, StretchFactor: 1},
+						Label{Text: "端口", Row: 1, Column: 2},
+						LineEdit{AssignTo: &a.udpLocalPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 1, Column: 3},
+						HSpacer{Row: 0, Column: 4, RowSpan: 2},
 					}},
 				}},
 				CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true, Row: 0, Column: 3},
@@ -219,21 +237,22 @@ func (a *app) togglePort() {
 	a.opening = true
 	a.mu.Unlock()
 	a.updateControls()
-	if a.isNetwork() {
-		address, err := a.networkAddress()
+	if a.isUDP() {
+		localAddress, remoteAddress, err := a.udpAddresses()
 		if err != nil {
-			a.mu.Lock()
-			a.opening = false
-			a.mu.Unlock()
-			a.updateControls()
-			a.showError(err)
+			a.openFailed(err)
 			return
 		}
-		if a.isUDP() {
-			a.manager.OpenUDP(address)
-		} else {
-			a.manager.OpenTCP(address)
+		a.manager.OpenUDP(localAddress, remoteAddress)
+		return
+	}
+	if a.isTCP() {
+		localAddress, address, err := a.tcpAddresses()
+		if err != nil {
+			a.openFailed(err)
+			return
 		}
+		a.manager.OpenTCP(localAddress, address)
 		return
 	}
 	c, err := a.serialConfig()
@@ -248,6 +267,14 @@ func (a *app) togglePort() {
 	a.manager.Open(c)
 }
 
+func (a *app) openFailed(err error) {
+	a.mu.Lock()
+	a.opening = false
+	a.mu.Unlock()
+	a.updateControls()
+	a.showError(err)
+}
+
 func (a *app) isTCP() bool     { return a.connectionTypeCB.CurrentIndex() == 1 }
 func (a *app) isUDP() bool     { return a.connectionTypeCB.CurrentIndex() == 2 }
 func (a *app) isNetwork() bool { return a.isTCP() || a.isUDP() }
@@ -260,6 +287,49 @@ func (a *app) networkAddress() (string, error) {
 	port, err := strconv.Atoi(strings.TrimSpace(a.tcpPortLE.Text()))
 	if err != nil || port < 1 || port > 65535 {
 		return "", fmt.Errorf("端口必须在 1 到 65535 之间")
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+func (a *app) tcpAddresses() (string, string, error) {
+	remote, err := a.networkAddress()
+	if err != nil {
+		return "", "", err
+	}
+	if !a.tcpBindLocalCB.Checked() {
+		return "", remote, nil
+	}
+	local, err := endpointAddress(a.tcpLocalHostLE.Text(), a.tcpLocalPortLE.Text(), "本地")
+	if err != nil {
+		return "", "", err
+	}
+	return local, remote, nil
+}
+
+func (a *app) udpAddresses() (string, string, error) {
+	remote, err := endpointAddress(a.udpRemoteHostLE.Text(), a.udpRemotePortLE.Text(), "对端")
+	if err != nil {
+		return "", "", err
+	}
+	if !a.udpBindLocalCB.Checked() {
+		return "", remote, nil
+	}
+	local, err := endpointAddress(a.udpLocalHostLE.Text(), a.udpLocalPortLE.Text(), "本地")
+	if err != nil {
+		return "", "", err
+	}
+	return local, remote, nil
+}
+
+func endpointAddress(hostText, portText, name string) (string, error) {
+	host := strings.TrimSpace(hostText)
+	if host == "" {
+		return "", fmt.Errorf("%s IP 不能为空", name)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("%s端口必须在 1 到 65535 之间", name)
 	}
 	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
@@ -466,13 +536,13 @@ func (a *app) refreshPorts() {
 }
 
 func (a *app) connectionTypeChanged() {
-	if a.serialBasic == nil || a.tcpBasic == nil || a.serialOptions == nil {
+	if a.serialBasic == nil || a.tcpBasic == nil || a.udpBasic == nil || a.serialOptions == nil {
 		return
 	}
-	network := a.isNetwork()
-	a.serialBasic.SetVisible(!network)
-	a.serialOptions.SetVisible(!network)
-	a.tcpBasic.SetVisible(network)
+	a.serialBasic.SetVisible(!a.isNetwork())
+	a.serialOptions.SetVisible(!a.isNetwork())
+	a.tcpBasic.SetVisible(a.isTCP())
+	a.udpBasic.SetVisible(a.isUDP())
 	a.updateControls()
 }
 func (a *app) clearReceive() {
@@ -518,7 +588,7 @@ func (a *app) updateControls() {
 	if a.isTCP() {
 		mode = "TCP 客户端"
 	} else if a.isUDP() {
-		mode = "UDP 客户端"
+		mode = "UDP"
 	}
 	a.openBtn.SetText(map[bool]string{true: "关闭" + mode, false: "打开" + mode}[opening])
 	a.sendBtn.SetEnabled(connected)
@@ -529,6 +599,14 @@ func (a *app) updateControls() {
 	}
 	a.tcpHostLE.SetEnabled(!opening)
 	a.tcpPortLE.SetEnabled(!opening)
+	a.tcpBindLocalCB.SetEnabled(!opening)
+	a.tcpLocalHostLE.SetEnabled(!opening && a.tcpBindLocalCB.Checked())
+	a.tcpLocalPortLE.SetEnabled(!opening && a.tcpBindLocalCB.Checked())
+	a.udpRemoteHostLE.SetEnabled(!opening)
+	a.udpRemotePortLE.SetEnabled(!opening)
+	a.udpBindLocalCB.SetEnabled(!opening)
+	a.udpLocalHostLE.SetEnabled(!opening && a.udpBindLocalCB.Checked())
+	a.udpLocalPortLE.SetEnabled(!opening && a.udpBindLocalCB.Checked())
 	a.dtrCB.SetEnabled(connected && !a.isNetwork())
 	a.rtsCB.SetEnabled(connected && !a.isNetwork())
 }
@@ -701,6 +779,14 @@ func (a *app) loadSettings() {
 	a.portCB.SetText(config.Load("Port", "COM1"))
 	a.tcpHostLE.SetText(config.Load("TCPHost", "127.0.0.1"))
 	a.tcpPortLE.SetText(config.Load("TCPPort", "8080"))
+	a.tcpLocalHostLE.SetText(config.Load("TCPLocalHost", "0.0.0.0"))
+	a.tcpLocalPortLE.SetText(config.Load("TCPLocalPort", "8080"))
+	a.tcpBindLocalCB.SetChecked(config.LoadInt("TCPBindLocal", 0) != 0)
+	a.udpLocalHostLE.SetText(config.Load("UDPLocalHost", "0.0.0.0"))
+	a.udpLocalPortLE.SetText(config.Load("UDPLocalPort", "8080"))
+	a.udpRemoteHostLE.SetText(config.Load("UDPRemoteHost", "127.0.0.1"))
+	a.udpRemotePortLE.SetText(config.Load("UDPRemotePort", "8080"))
+	a.udpBindLocalCB.SetChecked(config.LoadInt("UDPBindLocal", 0) != 0)
 	a.baudCB.SetText(config.Load("Baud", "115200"))
 	setIndex(a.dataCB, config.LoadInt("DataBits", 3))
 	setIndex(a.parityCB, config.LoadInt("Parity", 0))
@@ -727,6 +813,14 @@ func (a *app) saveSettings() {
 	config.Save("Port", a.portCB.Text())
 	config.Save("TCPHost", a.tcpHostLE.Text())
 	config.Save("TCPPort", a.tcpPortLE.Text())
+	config.Save("TCPLocalHost", a.tcpLocalHostLE.Text())
+	config.Save("TCPLocalPort", a.tcpLocalPortLE.Text())
+	saveBool("TCPBindLocal", a.tcpBindLocalCB.Checked())
+	config.Save("UDPLocalHost", a.udpLocalHostLE.Text())
+	config.Save("UDPLocalPort", a.udpLocalPortLE.Text())
+	config.Save("UDPRemoteHost", a.udpRemoteHostLE.Text())
+	config.Save("UDPRemotePort", a.udpRemotePortLE.Text())
+	saveBool("UDPBindLocal", a.udpBindLocalCB.Checked())
 	config.Save("Baud", a.baudCB.Text())
 	config.SaveInt("DataBits", a.dataCB.CurrentIndex())
 	config.SaveInt("Parity", a.parityCB.CurrentIndex())
