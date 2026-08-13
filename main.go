@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package main
@@ -150,18 +151,20 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 			Composite{Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 7}, Children: []Widget{
 				Label{Text: "连接", Row: 0, Column: 0},
 				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "UDP 客户端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
-				Composite{AssignTo: &a.serialBasic, Row: 0, Column: 2, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
-					Label{Text: "串口", Row: 0, Column: 0},
-					ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}, Row: 0, Column: 1},
-					PushButton{AssignTo: &a.refreshBtn, Text: "刷新", Row: 0, Column: 2, OnClicked: a.refreshPorts},
-					Label{Text: "波特率", Row: 0, Column: 3},
-					ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}, Row: 0, Column: 4},
-				}},
-				Composite{AssignTo: &a.tcpBasic, Visible: false, Row: 0, Column: 2, StretchFactor: 1, Layout: Grid{Columns: 4, MarginsZero: true, Spacing: 6}, Children: []Widget{
-					Label{Text: "服务器", Row: 0, Column: 0},
-					LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 160}, Row: 0, Column: 1, StretchFactor: 1},
-					Label{Text: "端口", Row: 0, Column: 2},
-					LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, Row: 0, Column: 3},
+				Composite{Row: 0, Column: 2, StretchFactor: 1, Layout: HBox{MarginsZero: true}, Children: []Widget{
+					Composite{AssignTo: &a.serialBasic, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
+						Label{Text: "串口", Row: 0, Column: 0},
+						ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}, Row: 0, Column: 1},
+						PushButton{AssignTo: &a.refreshBtn, Text: "刷新", Row: 0, Column: 2, OnClicked: a.refreshPorts},
+						Label{Text: "波特率", Row: 0, Column: 3},
+						ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}, Row: 0, Column: 4},
+					}},
+					Composite{AssignTo: &a.tcpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 4, MarginsZero: true, Spacing: 6}, Children: []Widget{
+						Label{Text: "服务器", Row: 0, Column: 0},
+						LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 160}, Row: 0, Column: 1, StretchFactor: 1},
+						Label{Text: "端口", Row: 0, Column: 2},
+						LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, Row: 0, Column: 3},
+					}},
 				}},
 				CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true, Row: 0, Column: 3},
 				PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 104}, Row: 0, Column: 4, OnClicked: a.togglePort},
