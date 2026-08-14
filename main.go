@@ -30,7 +30,7 @@ import (
 const appName = "UniCom 通信调试助手"
 
 var (
-	VERSION    = "0.0.1"
+	VERSION    = "0.0.2"
 	GIT_HASH   = "unknown"
 	BUILD_TIME = "unknown"
 	appTitle   = fmt.Sprintf("%s v%s | %s | %s", appName, VERSION, GIT_HASH, BUILD_TIME)
