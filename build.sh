@@ -44,6 +44,7 @@ esac
 rm -rf -- "$STAGE"
 mkdir -p -- "$STAGE"
 cp -- "$PROJECT_ROOT/main.go" "$STAGE/main.go"
+cp -- "$PROJECT_ROOT/endpoint_input.go" "$PROJECT_ROOT/endpoint_input_test.go" "$STAGE/"
 cp -R -- "$PROJECT_ROOT/internal" "$STAGE/internal"
 cp -R -- "$PROJECT_ROOT/vendor" "$STAGE/vendor"
 cp -- "$RESOURCE" "$STAGE/unicom_windows_386.syso"

@@ -97,6 +97,7 @@ func (a *app) run() error {
 	}
 	a.dtrCB.CheckedChanged().Attach(a.dtrChanged)
 	a.rtsCB.CheckedChanged().Attach(a.rtsChanged)
+	a.attachEndpointInputHandlers()
 	a.receiveTE.SizeChanged().Attach(a.updateReceiveWrap)
 	a.sendTE.SizeChanged().Attach(a.updateSendWrap)
 	if err := a.createTerminal(); err != nil {
@@ -302,6 +303,34 @@ func (a *app) isTCP() bool       { return a.connectionTypeCB.CurrentIndex() == 1
 func (a *app) isTCPServer() bool { return a.connectionTypeCB.CurrentIndex() == 2 }
 func (a *app) isUDP() bool       { return a.connectionTypeCB.CurrentIndex() == 3 }
 func (a *app) isNetwork() bool   { return a.isTCP() || a.isUDP() || a.isTCPServer() }
+
+func (a *app) attachEndpointInputHandlers() {
+	pairs := []struct {
+		host *walk.LineEdit
+		port *walk.LineEdit
+	}{
+		{a.tcpHostLE, a.tcpPortLE},
+		{a.tcpLocalHostLE, a.tcpLocalPortLE},
+		{a.tcpServerHostLE, a.tcpServerPortLE},
+		{a.udpRemoteHostLE, a.udpRemotePortLE},
+		{a.udpLocalHostLE, a.udpLocalPortLE},
+	}
+	for _, pair := range pairs {
+		hostEdit, portEdit := pair.host, pair.port
+		hostEdit.KeyDown().Attach(func(key walk.Key) {
+			if key != walk.KeyReturn {
+				return
+			}
+			host, port, hasPort := normalizeEndpointInput(hostEdit.Text())
+			if host != hostEdit.Text() {
+				hostEdit.SetText(host)
+			}
+			if hasPort && port != portEdit.Text() {
+				portEdit.SetText(port)
+			}
+		})
+	}
+}
 
 func (a *app) networkAddress() (string, error) {
 	host := strings.TrimSpace(a.tcpHostLE.Text())
