@@ -63,8 +63,8 @@ if [[ "$SKIP_TESTS" -eq 0 ]]; then
 fi
 
 OUTPUT_WIN="$(cygpath -w "$OUTPUT")"
-LDFLAGS="-H windowsgui -s -w -X main.VERSION=$VERSION -X main.GIT_HASH=$GIT_HASH -X main.BUILD_TIME=$BUILD_TIME"
+LDFLAGS="-H windowsgui -s -w -X main.GIT_HASH=$GIT_HASH -X main.BUILD_TIME=$BUILD_TIME"
 "$GO_EXE" build -ldflags "$LDFLAGS" -o "$OUTPUT_WIN" unicom
 
 SIZE="$(stat -c '%s' "$OUTPUT")"
-printf 'Build complete: %s (%s bytes)\nVersion: %s | %s | %s\n' "$OUTPUT" "$SIZE" "$VERSION" "$GIT_HASH" "$BUILD_TIME"
+printf 'Build complete: %s (%s bytes)\nVersion: %s | %s | %s\n' "$OUTPUT" "$SIZE" "$GIT_HASH" "$BUILD_TIME"

@@ -18,6 +18,8 @@ const (
 	emExGetSel        = 0x0434
 	emExLimitText     = 0x0435
 	emExSetSel        = 0x0437
+	emGetScrollPos    = 0x04DD
+	emSetScrollPos    = 0x04DE
 	emSetTargetDevice = 0x0448
 )
 
@@ -32,10 +34,17 @@ type charRange struct {
 	Max int32
 }
 
+type ScrollPosition struct {
+	X int32
+	Y int32
+}
+
 type Edit struct {
 	walk.WidgetBase
 	readOnlyChangedPublisher walk.EventPublisher
 	textChangedPublisher     walk.EventPublisher
+	viewportChangedPublisher walk.EventPublisher
+	mouseSelecting           bool
 }
 
 func ensureRichEdit() error {
@@ -123,6 +132,38 @@ func (e *Edit) SetTextSelection(start, end int) {
 	e.SendMessage(emExSetSel, 0, uintptr(unsafe.Pointer(&r)))
 }
 
+func (e *Edit) ScrollPosition() ScrollPosition {
+	position := ScrollPosition{}
+	e.SendMessage(emGetScrollPos, 0, uintptr(unsafe.Pointer(&position)))
+	return position
+}
+
+func (e *Edit) SetScrollPosition(position ScrollPosition) {
+	e.SendMessage(emSetScrollPos, 0, uintptr(unsafe.Pointer(&position)))
+}
+
+func (e *Edit) IsScrolledToBottom() bool {
+	if e.TextLength() == 0 {
+		return true
+	}
+	info := win.SCROLLINFO{CbSize: uint32(unsafe.Sizeof(win.SCROLLINFO{})), FMask: win.SIF_RANGE | win.SIF_PAGE | win.SIF_POS}
+	if !win.GetScrollInfo(e.Handle(), win.SB_VERT, &info) {
+		return true
+	}
+	maxPosition := info.NMax - int32(info.NPage) + 1
+	if maxPosition < info.NMin {
+		maxPosition = info.NMin
+	}
+	return info.NPos >= maxPosition-1
+}
+
+func (e *Edit) ScrollToBottom() {
+	position := e.ScrollPosition()
+	position.Y = 1 << 30
+	e.SetScrollPosition(position)
+	e.SendMessage(win.WM_VSCROLL, win.SB_BOTTOM, 0)
+}
+
 func (e *Edit) ReplaceSelectedText(text string, canUndo bool) {
 	p, err := syscall.UTF16PtrFromString(text)
 	if err != nil {
@@ -157,6 +198,14 @@ func (e *Edit) SetMaxLength(value int) {
 
 func (e *Edit) TextChanged() *walk.Event {
 	return e.textChangedPublisher.Event()
+}
+
+func (e *Edit) ViewportChanged() *walk.Event {
+	return e.viewportChangedPublisher.Event()
+}
+
+func (e *Edit) MouseSelecting() bool {
+	return e.mouseSelecting
 }
 
 func (e *Edit) SetWordWrap(wrap bool) {
@@ -194,6 +243,17 @@ func (e *Edit) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if walk.Key(wParam) == walk.KeyA && walk.ControlDown() {
 			e.SetTextSelection(0, -1)
 		}
+	case win.WM_LBUTTONDOWN:
+		e.mouseSelecting = true
+	case win.WM_LBUTTONUP:
+		result := e.WidgetBase.WndProc(hwnd, msg, wParam, lParam)
+		e.mouseSelecting = false
+		e.viewportChangedPublisher.Publish()
+		return result
+	case win.WM_VSCROLL, win.WM_MOUSEWHEEL, win.WM_KEYUP:
+		result := e.WidgetBase.WndProc(hwnd, msg, wParam, lParam)
+		e.viewportChangedPublisher.Publish()
+		return result
 	}
 	return e.WidgetBase.WndProc(hwnd, msg, wParam, lParam)
 }

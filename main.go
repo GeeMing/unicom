@@ -60,24 +60,25 @@ type app struct {
 	terminal                                                           *terminalview.TerminalView
 	deviceWatcher                                                      *devicewatch.Watcher
 
-	manager            *connection.Manager
-	buffer             *session.Buffer
-	mu                 sync.Mutex
-	connected, opening bool
-	txBytes            uint64
-	lastShownRX        uint64
-	lastRender         time.Time
-	pending            []byte
-	renderEncoding     string
-	termLastRX         uint64
-	termPending        []byte
-	termEncoding       string
-	cycleStop          chan struct{}
-	localIPOptions     []localIPOption
-	receiveChunks      []receiveChunk
-	receiveChunkBytes  int
-	nextReceiveSeq     uint64
-	lastMarkedSeq      uint64
+	manager             *connection.Manager
+	buffer              *session.Buffer
+	mu                  sync.Mutex
+	connected, opening  bool
+	txBytes             uint64
+	lastShownRX         uint64
+	lastRender          time.Time
+	pending             []byte
+	renderEncoding      string
+	termLastRX          uint64
+	termPending         []byte
+	termEncoding        string
+	cycleStop           chan struct{}
+	localIPOptions      []localIPOption
+	receiveChunks       []receiveChunk
+	receiveChunkBytes   int
+	nextReceiveSeq      uint64
+	lastMarkedSeq       uint64
+	receiveFollowBottom bool
 }
 
 type receiveChunk struct {
@@ -87,11 +88,18 @@ type receiveChunk struct {
 	received time.Time
 }
 
+type receiveScrollState struct {
+	followBottom bool
+	position     wrapedit.ScrollPosition
+	selectionMin int
+	selectionMax int
+}
+
 var encodings = []string{"UTF-8", "GBK", "GB18030", "Big5", "ASCII", "UTF-16LE", "UTF-16BE"}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	a := &app{buffer: session.NewBuffer(2 * 1024 * 1024)}
+	a := &app{buffer: session.NewBuffer(2 * 1024 * 1024), receiveFollowBottom: true}
 	if err := a.run(); err != nil {
 		walk.MsgBox(nil, appTitle, err.Error(), walk.MsgBoxOK|walk.MsgBoxIconError)
 	}
@@ -115,6 +123,9 @@ func (a *app) run() error {
 	a.rtsCB.CheckedChanged().Attach(a.rtsChanged)
 	a.attachEndpointInputHandlers()
 	a.receiveTE.SizeChanged().Attach(a.updateReceiveWrap)
+	a.receiveTE.ViewportChanged().Attach(func() {
+		a.receiveFollowBottom = a.receiveTE.IsScrolledToBottom()
+	})
 	a.sendTE.SizeChanged().Attach(a.updateSendWrap)
 	if err := a.createTerminal(); err != nil {
 		return err
@@ -500,6 +511,38 @@ func (a *app) scheduleRender() {
 	a.mw.Synchronize(a.renderPending)
 }
 
+func (a *app) captureReceiveScroll() receiveScrollState {
+	if a.receiveTE == nil {
+		return receiveScrollState{}
+	}
+	selectionMin, selectionMax := a.receiveTE.TextSelection()
+	return receiveScrollState{
+		followBottom: a.autoScrollCB != nil && a.autoScrollCB.Checked() && a.receiveFollowBottom && !a.receiveTE.MouseSelecting(),
+		position:     a.receiveTE.ScrollPosition(),
+		selectionMin: selectionMin,
+		selectionMax: selectionMax,
+	}
+}
+
+func (a *app) restoreReceiveScroll(state receiveScrollState, restoreSelection bool) {
+	if restoreSelection {
+		length := a.receiveTE.TextLength()
+		if state.selectionMin > length {
+			state.selectionMin = length
+		}
+		if state.selectionMax > length {
+			state.selectionMax = length
+		}
+		a.receiveTE.SetTextSelection(state.selectionMin, state.selectionMax)
+	}
+	if state.followBottom {
+		a.receiveTE.ScrollToBottom()
+		a.receiveFollowBottom = true
+		return
+	}
+	a.receiveTE.SetScrollPosition(state.position)
+}
+
 func (a *app) renderAll() {
 	data, rx := a.buffer.Snapshot()
 	if a.termModeCB != nil && a.termModeCB.Checked() {
@@ -533,15 +576,17 @@ func (a *app) renderAll() {
 	}
 	a.pending = a.pending[:0]
 	a.renderEncoding = a.selectedEncoding()
+	scroll := a.captureReceiveScroll()
 	a.receiveTE.SetText(text)
-	if a.autoScrollCB.Checked() {
-		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
-	}
+	a.restoreReceiveScroll(scroll, true)
 	a.lastShownRX = rx
 	a.updateCounters(rx)
 }
 
 func (a *app) renderPending() {
+	if a.receiveTE != nil && a.receiveTE.MouseSelecting() {
+		return
+	}
 	if a.termModeCB != nil && a.termModeCB.Checked() {
 		a.renderTerminalPending()
 		return
@@ -568,22 +613,20 @@ func (a *app) renderPending() {
 		if a.receiveTE.TextLength() > 0 && text != "" {
 			text = " " + text
 		}
+		scroll := a.captureReceiveScroll()
 		a.receiveTE.AppendText(text)
+		a.restoreReceiveScroll(scroll, false)
 		a.lastShownRX = rx
 		a.updateCounters(rx)
-		if a.autoScrollCB.Checked() {
-			a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
-		}
 		return
 	}
 	data = append(a.pending, data...)
 	n := codec.CompletePrefix(data, a.selectedEncoding())
 	a.pending = append(a.pending[:0], data[n:]...)
 	if n > 0 {
+		scroll := a.captureReceiveScroll()
 		a.receiveTE.AppendText(codec.Decode(data[:n], a.selectedEncoding()))
-	}
-	if a.autoScrollCB.Checked() {
-		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
+		a.restoreReceiveScroll(scroll, false)
 	}
 	a.lastShownRX = rx
 	a.updateCounters(rx)
@@ -634,6 +677,7 @@ func (a *app) renderAllWithSenders() {
 	}
 	a.pending = a.pending[:0]
 	a.renderEncoding = a.selectedEncoding()
+	scroll := a.captureReceiveScroll()
 	a.receiveTE.SetText(b.String())
 	if len(chunks) > 0 {
 		a.lastMarkedSeq = chunks[len(chunks)-1].sequence
@@ -642,9 +686,7 @@ func (a *app) renderAllWithSenders() {
 	}
 	a.lastShownRX = rx
 	a.updateCounters(rx)
-	if a.autoScrollCB.Checked() {
-		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
-	}
+	a.restoreReceiveScroll(scroll, true)
 }
 
 func (a *app) renderSenderPending() {
@@ -666,14 +708,14 @@ func (a *app) renderSenderPending() {
 		a.lastMarkedSeq = chunk.sequence
 	}
 	if b.Len() > 0 {
+		scroll := a.captureReceiveScroll()
 		a.receiveTE.AppendText(b.String())
+		a.restoreReceiveScroll(scroll, false)
 	}
 	a.lastShownRX = rx
 	a.updateCounters(rx)
 	if a.receiveTE.TextLength() > 2*1024*1024 {
 		a.renderAllWithSenders()
-	} else if a.autoScrollCB.Checked() {
-		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
 	}
 }
 
@@ -794,6 +836,7 @@ func (a *app) clearReceive() {
 	a.termPending = a.termPending[:0]
 	a.termLastRX = 0
 	a.receiveTE.SetText("")
+	a.receiveFollowBottom = true
 	if a.terminal != nil {
 		a.terminal.Reset()
 	}
