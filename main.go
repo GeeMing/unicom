@@ -15,6 +15,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 
 	"unicom/internal/codec"
 	"unicom/internal/config"
@@ -40,6 +41,7 @@ type app struct {
 	connectionTypeCB, portCB, baudCB, dataCB, parityCB, stopCB, flowCB *walk.ComboBox
 	encodingCB, sendEncodingCB, lineEndingCB                           *walk.ComboBox
 	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                    *walk.PushButton
+	tcpLocalHostPicker, tcpServerHostPicker, udpLocalHostPicker        *walk.ToolButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB  *walk.CheckBox
 	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB         *walk.CheckBox
 	tcpBindLocalCB, udpBindLocalCB                                     *walk.CheckBox
@@ -70,6 +72,7 @@ type app struct {
 	termPending        []byte
 	termEncoding       string
 	cycleStop          chan struct{}
+	localIPOptions     []localIPOption
 }
 
 var encodings = []string{"UTF-8", "GBK", "GB18030", "Big5", "ASCII", "UTF-16LE", "UTF-16BE"}
@@ -88,6 +91,7 @@ func (a *app) run() error {
 		return fmt.Errorf("load application icon: %v", err)
 	}
 	defer windowIcon.Dispose()
+	a.localIPOptions = listLocalIPOptions()
 
 	if err := a.createUI(windowIcon); err != nil {
 		return err
@@ -153,18 +157,27 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 							Label{Text: "服务器 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", Row: 0, Column: 1},
 							Label{Text: "服务器端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
 							CheckBox{AssignTo: &a.tcpBindLocalCB, Text: "指定本地地址", Row: 2, Column: 0, ColumnSpan: 2, OnCheckedChanged: a.updateControls},
-							Label{Text: "本地 IP", Row: 3, Column: 0}, LineEdit{AssignTo: &a.tcpLocalHostLE, Text: "0.0.0.0", Row: 3, Column: 1},
+							Label{Text: "本地 IP", Row: 3, Column: 0}, Composite{Row: 3, Column: 1, Layout: HBox{MarginsZero: true, SpacingZero: true}, Children: []Widget{
+								LineEdit{AssignTo: &a.tcpLocalHostLE, Text: "0.0.0.0", StretchFactor: 1},
+								ToolButton{AssignTo: &a.tcpLocalHostPicker, Text: "\u25be", MinSize: Size{Width: 28}, MaxSize: Size{Width: 28}, ToolTipText: "选择本机 IP", ContextMenuItems: a.localIPMenuItems(&a.tcpLocalHostLE), OnClicked: func() { showLocalIPMenu(a.tcpLocalHostPicker) }},
+							}},
 							Label{Text: "本地端口", Row: 4, Column: 0}, LineEdit{AssignTo: &a.tcpLocalPortLE, Text: "8080", MaxLength: 5, Row: 4, Column: 1},
 						}},
 						Composite{AssignTo: &a.tcpServerBasic, Visible: false, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
-							Label{Text: "监听 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.tcpServerHostLE, Text: "0.0.0.0", Row: 0, Column: 1},
+							Label{Text: "监听 IP", Row: 0, Column: 0}, Composite{Row: 0, Column: 1, Layout: HBox{MarginsZero: true, SpacingZero: true}, Children: []Widget{
+								LineEdit{AssignTo: &a.tcpServerHostLE, Text: "0.0.0.0", StretchFactor: 1},
+								ToolButton{AssignTo: &a.tcpServerHostPicker, Text: "\u25be", MinSize: Size{Width: 28}, MaxSize: Size{Width: 28}, ToolTipText: "选择本机 IP", ContextMenuItems: a.localIPMenuItems(&a.tcpServerHostLE), OnClicked: func() { showLocalIPMenu(a.tcpServerHostPicker) }},
+							}},
 							Label{Text: "监听端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.tcpServerPortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
 						}},
 						Composite{AssignTo: &a.udpBasic, Visible: false, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
 							Label{Text: "对端 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.udpRemoteHostLE, Text: "127.0.0.1", Row: 0, Column: 1},
 							Label{Text: "对端端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.udpRemotePortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
 							CheckBox{AssignTo: &a.udpBindLocalCB, Text: "指定本地地址", Row: 2, Column: 0, ColumnSpan: 2, OnCheckedChanged: a.updateControls},
-							Label{Text: "本地 IP", Row: 3, Column: 0}, LineEdit{AssignTo: &a.udpLocalHostLE, Text: "0.0.0.0", Row: 3, Column: 1},
+							Label{Text: "本地 IP", Row: 3, Column: 0}, Composite{Row: 3, Column: 1, Layout: HBox{MarginsZero: true, SpacingZero: true}, Children: []Widget{
+								LineEdit{AssignTo: &a.udpLocalHostLE, Text: "0.0.0.0", StretchFactor: 1},
+								ToolButton{AssignTo: &a.udpLocalHostPicker, Text: "\u25be", MinSize: Size{Width: 28}, MaxSize: Size{Width: 28}, ToolTipText: "选择本机 IP", ContextMenuItems: a.localIPMenuItems(&a.udpLocalHostLE), OnClicked: func() { showLocalIPMenu(a.udpLocalHostPicker) }},
+							}},
 							Label{Text: "本地端口", Row: 4, Column: 0}, LineEdit{AssignTo: &a.udpLocalPortLE, Text: "8080", MaxLength: 5, Row: 4, Column: 1},
 						}},
 					}},
@@ -304,9 +317,15 @@ func (a *app) isTCPServer() bool { return a.connectionTypeCB.CurrentIndex() == 2
 func (a *app) isUDP() bool       { return a.connectionTypeCB.CurrentIndex() == 3 }
 func (a *app) isNetwork() bool   { return a.isTCP() || a.isUDP() || a.isTCPServer() }
 
+type endpointTextInput interface {
+	Text() string
+	SetText(string) error
+	KeyDown() *walk.KeyEvent
+}
+
 func (a *app) attachEndpointInputHandlers() {
 	pairs := []struct {
-		host *walk.LineEdit
+		host endpointTextInput
 		port *walk.LineEdit
 	}{
 		{a.tcpHostLE, a.tcpPortLE},
@@ -330,6 +349,37 @@ func (a *app) attachEndpointInputHandlers() {
 			}
 		})
 	}
+}
+
+func (a *app) localIPMenuItems(target **walk.LineEdit) []MenuItem {
+	items := make([]MenuItem, 0, len(a.localIPOptions))
+	for _, option := range a.localIPOptions {
+		ip := option.IP
+		items = append(items, Action{
+			Text: option.Label,
+			OnTriggered: func() {
+				if *target != nil {
+					(*target).SetText(ip)
+				}
+			},
+		})
+	}
+	return items
+}
+
+func showLocalIPMenu(button *walk.ToolButton) {
+	if button == nil || button.ContextMenu() == nil {
+		return
+	}
+	p := win.POINT{Y: int32(button.ClientBounds().Height)}
+	if !win.ClientToScreen(button.Handle(), &p) {
+		return
+	}
+	button.SendMessage(
+		win.WM_CONTEXTMENU,
+		uintptr(button.Handle()),
+		uintptr(win.MAKELONG(uint16(p.X), uint16(p.Y))),
+	)
 }
 
 func (a *app) networkAddress() (string, error) {
@@ -659,13 +709,16 @@ func (a *app) updateControls() {
 	a.tcpPortLE.SetEnabled(!opening)
 	a.tcpBindLocalCB.SetEnabled(!opening)
 	a.tcpLocalHostLE.SetEnabled(!opening && a.tcpBindLocalCB.Checked())
+	a.tcpLocalHostPicker.SetEnabled(!opening && a.tcpBindLocalCB.Checked())
 	a.tcpLocalPortLE.SetEnabled(!opening && a.tcpBindLocalCB.Checked())
 	a.udpRemoteHostLE.SetEnabled(!opening)
 	a.udpRemotePortLE.SetEnabled(!opening)
 	a.udpBindLocalCB.SetEnabled(!opening)
 	a.udpLocalHostLE.SetEnabled(!opening && a.udpBindLocalCB.Checked())
+	a.udpLocalHostPicker.SetEnabled(!opening && a.udpBindLocalCB.Checked())
 	a.udpLocalPortLE.SetEnabled(!opening && a.udpBindLocalCB.Checked())
 	a.tcpServerHostLE.SetEnabled(!opening)
+	a.tcpServerHostPicker.SetEnabled(!opening)
 	a.tcpServerPortLE.SetEnabled(!opening)
 	a.dtrCB.SetEnabled(connected && !a.isNetwork())
 	a.rtsCB.SetEnabled(connected && !a.isNetwork())

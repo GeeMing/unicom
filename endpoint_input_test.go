@@ -2,6 +2,31 @@ package main
 
 import "testing"
 
+func TestBuildLocalIPOptions(t *testing.T) {
+	options := buildLocalIPOptions([]localIPOption{
+		{IP: "192.168.1.20", Label: formatLocalIPOption("192.168.1.20", "Wi-Fi")},
+		{IP: "10.0.0.2", Label: formatLocalIPOption("10.0.0.2", "Ethernet")},
+		{IP: "192.168.1.20", Label: formatLocalIPOption("192.168.1.20", "Duplicate")},
+		{IP: "127.0.0.1", Label: formatLocalIPOption("127.0.0.1", "Loopback")},
+	})
+
+	wantIPs := []string{"0.0.0.0", "127.0.0.1", "10.0.0.2", "192.168.1.20"}
+	if len(options) != len(wantIPs) {
+		t.Fatalf("len(options) = %d, want %d", len(options), len(wantIPs))
+	}
+	for i, want := range wantIPs {
+		if options[i].IP != want {
+			t.Errorf("options[%d].IP = %q, want %q", i, options[i].IP, want)
+		}
+		if options[i].Label == options[i].IP {
+			t.Errorf("options[%d].Label = %q, want IP and interface name", i, options[i].Label)
+		}
+	}
+	if options[0].Label != "0.0.0.0 [所有网卡]" {
+		t.Errorf("default label = %q", options[0].Label)
+	}
+}
+
 func TestNormalizeIPInput(t *testing.T) {
 	got := normalizeIPInput(" 192\uff0e168\uff0e1\uff0e20\uff1a\t9000\r\n")
 	want := "192.168.1.20:9000"
