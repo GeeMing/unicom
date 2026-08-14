@@ -49,9 +49,11 @@ type app struct {
 	tcpServerHostLE, tcpServerPortLE                                   *walk.LineEdit
 	udpLocalHostLE, udpLocalPortLE, udpRemoteHostLE, udpRemotePortLE   *walk.LineEdit
 	statusItem, countersItem                                           *walk.StatusBarItem
-	receiveTools, sendPanel, terminalHost                              *walk.Composite
-	serialBasic, serialOptions, tcpBasic, udpBasic, tcpServerBasic     *walk.Composite
-	contentSplitter                                                    *walk.Splitter
+	receiveTools, sendPanel, terminalHost, terminalPanel               *walk.Composite
+	rightPanel, settingsPanel, serialBasic, tcpBasic, udpBasic         *walk.Composite
+	tcpServerBasic                                                     *walk.Composite
+	modeSettingsGB                                                     *walk.GroupBox
+	mainSplitter, contentSplitter                                      *walk.Splitter
 	terminal                                                           *terminalview.TerminalView
 	deviceWatcher                                                      *devicewatch.Watcher
 
@@ -90,6 +92,9 @@ func (a *app) run() error {
 	if err := a.createUI(windowIcon); err != nil {
 		return err
 	}
+	if err := a.mainSplitter.SetFixed(a.settingsPanel, true); err != nil {
+		return err
+	}
 	a.dtrCB.CheckedChanged().Attach(a.dtrChanged)
 	a.rtsCB.CheckedChanged().Attach(a.rtsChanged)
 	a.receiveTE.SizeChanged().Attach(a.updateReceiveWrap)
@@ -120,93 +125,94 @@ func (a *app) run() error {
 
 func (a *app) createUI(windowIcon *walk.Icon) error {
 	return MainWindow{
-		AssignTo: &a.mw, Title: appTitle, MinSize: Size{Width: 840, Height: 580}, Size: Size{Width: 1040, Height: 720},
+		AssignTo: &a.mw, Title: appTitle, MinSize: Size{Width: 900, Height: 600}, Size: Size{Width: 1180, Height: 760},
 		Icon: windowIcon,
 		Font: Font{Family: "Microsoft YaHei UI", PointSize: 9}, Layout: VBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 6},
 		StatusBarItems: []StatusBarItem{{AssignTo: &a.statusItem, Text: "连接已关闭", Width: 620}, {AssignTo: &a.countersItem, Text: "RX 0 B   TX 0 B", Width: 260}},
 		Children: []Widget{
-			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				CheckBox{AssignTo: &a.termModeCB, Text: "终端模式", OnCheckedChanged: a.termModeChanged},
-				Label{Text: "编码"}, ComboBox{AssignTo: &a.encodingCB, Model: encodings, OnCurrentIndexChanged: a.renderAll},
-				Composite{AssignTo: &a.receiveTools, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-					CheckBox{AssignTo: &a.hexRXCB, Text: "HEX", OnCheckedChanged: a.renderAll},
-					CheckBox{AssignTo: &a.timestampCB, Text: "时间戳", OnCheckedChanged: a.renderAll}, CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true},
-					CheckBox{AssignTo: &a.wrapRXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateReceiveWrap},
-				}},
-				HSpacer{},
-				PushButton{AssignTo: &a.clearBtn, Text: "清空", OnClicked: a.clearReceive}, PushButton{AssignTo: &a.saveBtn, Text: "保存", OnClicked: a.saveReceive},
-			}},
-			VSplitter{AssignTo: &a.contentSplitter, Name: "rxTxSplitter", HandleWidth: 6, Children: []Widget{
-				wrapedit.View{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, MaxLength: 4 * 1024 * 1024, MinSize: Size{Height: 100}, StretchFactor: 3, Font: Font{Family: "Consolas", PointSize: 10}},
-				Composite{AssignTo: &a.sendPanel, Layout: VBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-					wrapedit.View{AssignTo: &a.sendTE, MinSize: Size{Height: 78}, VScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
-					Composite{Layout: HBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
-						CheckBox{AssignTo: &a.hexTXCB, Text: "HEX 发送", OnCheckedChanged: a.updateEscapeState}, CheckBox{AssignTo: &a.escapeCB, Text: "启用转义"},
-						CheckBox{AssignTo: &a.wrapTXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateSendWrap},
-						Label{Text: "编码"}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings},
-						Label{Text: "行尾"}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}},
-						CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", OnCheckedChanged: a.cycleChanged}, LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, MinSize: Size{Width: 70}}, Label{Text: "ms"}, HSpacer{},
-						PushButton{AssignTo: &a.sendBtn, Text: "发送", MinSize: Size{Width: 92}, OnClicked: a.send},
+			HSplitter{AssignTo: &a.mainSplitter, Name: "mainSplitter", HandleWidth: 7, StretchFactor: 1, Children: []Widget{
+				Composite{AssignTo: &a.settingsPanel, MinSize: Size{Width: 260}, MaxSize: Size{Width: 420}, StretchFactor: 2, Layout: VBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+					GroupBox{Title: "连接模式", Layout: VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}}, Children: []Widget{
+						ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "TCP 服务端", "UDP"}, OnCurrentIndexChanged: a.connectionTypeChanged},
+					}},
+					GroupBox{AssignTo: &a.modeSettingsGB, Title: "模式设置", Layout: VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}}, Children: []Widget{
+						Composite{AssignTo: &a.serialBasic, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
+							Label{Text: "端口号", Row: 0, Column: 0}, Composite{Row: 0, Column: 1, Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
+								ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, StretchFactor: 1}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
+							}},
+							Label{Text: "波特率", Row: 1, Column: 0}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, Row: 1, Column: 1},
+							Label{Text: "数据位", Row: 2, Column: 0}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, Row: 2, Column: 1},
+							Label{Text: "校验位", Row: 3, Column: 0}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, Row: 3, Column: 1},
+							Label{Text: "停止位", Row: 4, Column: 0}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, Row: 4, Column: 1},
+							Label{Text: "流控制", Row: 5, Column: 0}, ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}, Row: 5, Column: 1},
+							Label{Text: "DTR 控制", Row: 6, Column: 0}, CheckBox{AssignTo: &a.dtrCB, Text: "启用", Row: 6, Column: 1},
+							Label{Text: "RTS 控制", Row: 7, Column: 0}, CheckBox{AssignTo: &a.rtsCB, Text: "启用", Row: 7, Column: 1},
+						}},
+						Composite{AssignTo: &a.tcpBasic, Visible: false, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
+							Label{Text: "服务器 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", Row: 0, Column: 1},
+							Label{Text: "服务器端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
+							CheckBox{AssignTo: &a.tcpBindLocalCB, Text: "指定本地地址", Row: 2, Column: 0, ColumnSpan: 2, OnCheckedChanged: a.updateControls},
+							Label{Text: "本地 IP", Row: 3, Column: 0}, LineEdit{AssignTo: &a.tcpLocalHostLE, Text: "0.0.0.0", Row: 3, Column: 1},
+							Label{Text: "本地端口", Row: 4, Column: 0}, LineEdit{AssignTo: &a.tcpLocalPortLE, Text: "8080", MaxLength: 5, Row: 4, Column: 1},
+						}},
+						Composite{AssignTo: &a.tcpServerBasic, Visible: false, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
+							Label{Text: "监听 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.tcpServerHostLE, Text: "0.0.0.0", Row: 0, Column: 1},
+							Label{Text: "监听端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.tcpServerPortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
+						}},
+						Composite{AssignTo: &a.udpBasic, Visible: false, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
+							Label{Text: "对端 IP", Row: 0, Column: 0}, LineEdit{AssignTo: &a.udpRemoteHostLE, Text: "127.0.0.1", Row: 0, Column: 1},
+							Label{Text: "对端端口", Row: 1, Column: 0}, LineEdit{AssignTo: &a.udpRemotePortLE, Text: "8080", MaxLength: 5, Row: 1, Column: 1},
+							CheckBox{AssignTo: &a.udpBindLocalCB, Text: "指定本地地址", Row: 2, Column: 0, ColumnSpan: 2, OnCheckedChanged: a.updateControls},
+							Label{Text: "本地 IP", Row: 3, Column: 0}, LineEdit{AssignTo: &a.udpLocalHostLE, Text: "0.0.0.0", Row: 3, Column: 1},
+							Label{Text: "本地端口", Row: 4, Column: 0}, LineEdit{AssignTo: &a.udpLocalPortLE, Text: "8080", MaxLength: 5, Row: 4, Column: 1},
+						}},
+					}},
+					VSpacer{},
+					GroupBox{Title: "公共设置", Layout: Grid{Columns: 2, Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}, Spacing: 7}, Children: []Widget{
+						Label{Text: "接收编码", Row: 0, Column: 0}, ComboBox{AssignTo: &a.encodingCB, Model: encodings, Row: 0, Column: 1, OnCurrentIndexChanged: a.renderAll},
+						CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true, Row: 1, Column: 0, ColumnSpan: 2},
+						PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Height: 34}, Row: 2, Column: 0, ColumnSpan: 2, OnClicked: a.togglePort},
 					}},
 				}},
-			}},
-			Composite{AssignTo: &a.terminalHost, Visible: false, Layout: VBox{MarginsZero: true}},
-			Composite{Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 7}, Children: []Widget{
-				Label{Text: "连接", Row: 0, Column: 0},
-				ComboBox{AssignTo: &a.connectionTypeCB, Model: []string{"串口", "TCP 客户端", "UDP", "TCP 服务端"}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 110}, Row: 0, Column: 1, OnCurrentIndexChanged: a.connectionTypeChanged},
-				Composite{Row: 0, Column: 2, StretchFactor: 1, Layout: HBox{MarginsZero: true}, Children: []Widget{
-					Composite{AssignTo: &a.serialBasic, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "串口", Row: 0, Column: 0},
-						ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, MinSize: Size{Width: 90}, MaxSize: Size{Width: 110}, Row: 0, Column: 1},
-						PushButton{AssignTo: &a.refreshBtn, Text: "刷新", Row: 0, Column: 2, OnClicked: a.refreshPorts},
-						Label{Text: "波特率", Row: 0, Column: 3},
-						ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, MinSize: Size{Width: 85}, MaxSize: Size{Width: 100}, Row: 0, Column: 4},
+				Composite{AssignTo: &a.rightPanel, StretchFactor: 7, Layout: VBox{MarginsZero: true}, Children: []Widget{
+					VSplitter{AssignTo: &a.contentSplitter, Name: "rxTxSplitter", HandleWidth: 7, Children: []Widget{
+						GroupBox{Title: "接收区", StretchFactor: 3, MinSize: Size{Height: 150}, Layout: HBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: []Widget{
+							Composite{MinSize: Size{Width: 220}, StretchFactor: 1000, Layout: VBox{MarginsZero: true}, Children: []Widget{
+								wrapedit.View{AssignTo: &a.receiveTE, ReadOnly: true, VScroll: true, MaxLength: 4 * 1024 * 1024, Font: Font{Family: "Consolas", PointSize: 10}},
+							}},
+							Composite{AssignTo: &a.receiveTools, MinSize: Size{Width: 156}, MaxSize: Size{Width: 156}, Layout: VBox{MarginsZero: true, Spacing: 7}, Children: []Widget{
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.termModeCB, Text: "终端模式", OnCheckedChanged: a.termModeChanged}, HSpacer{}}},
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true}, HSpacer{}}},
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.timestampCB, Text: "显示接收时间戳", OnCheckedChanged: a.renderAll}, HSpacer{}}},
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.hexRXCB, Text: "HEX 显示", OnCheckedChanged: a.renderAll}, HSpacer{}}},
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.wrapRXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateReceiveWrap}, HSpacer{}}},
+								VSpacer{},
+								PushButton{AssignTo: &a.clearBtn, Text: "清空 RX 区", OnClicked: a.clearReceive},
+								PushButton{AssignTo: &a.saveBtn, Text: "保存接收数据", OnClicked: a.saveReceive},
+							}},
+						}},
+						GroupBox{Title: "发送区", StretchFactor: 2, MinSize: Size{Height: 250}, Layout: HBox{Margins: Margins{Left: 8, Top: 8, Right: 8, Bottom: 8}, Spacing: 8}, Children: []Widget{
+							wrapedit.View{AssignTo: &a.sendTE, MinSize: Size{Width: 220, Height: 90}, StretchFactor: 1, VScroll: true, Font: Font{Family: "Consolas", PointSize: 10}},
+							Composite{AssignTo: &a.sendPanel, MinSize: Size{Width: 156}, MaxSize: Size{Width: 156}, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 6}, Children: []Widget{
+								CheckBox{AssignTo: &a.escapeCB, Text: "启用转义", Row: 0, Column: 0, ColumnSpan: 2},
+								CheckBox{AssignTo: &a.hexTXCB, Text: "HEX", Row: 1, Column: 0, OnCheckedChanged: a.updateEscapeState},
+								CheckBox{AssignTo: &a.wrapTXCB, Text: "换行", Checked: true, Row: 1, Column: 1, OnCheckedChanged: a.updateSendWrap},
+								Label{Text: "编码", Row: 2, Column: 0}, ComboBox{AssignTo: &a.sendEncodingCB, Model: encodings, Row: 2, Column: 1},
+								Label{Text: "行尾", Row: 3, Column: 0}, ComboBox{AssignTo: &a.lineEndingCB, Model: []string{"无", "CR", "LF", "CRLF"}, Row: 3, Column: 1},
+								CheckBox{AssignTo: &a.cycleCB, Text: "周期发送", Row: 4, Column: 0, ColumnSpan: 2, OnCheckedChanged: a.cycleChanged},
+								Label{Text: "间隔", Row: 5, Column: 0}, Composite{Row: 5, Column: 1, Layout: HBox{MarginsZero: true, Spacing: 4}, Children: []Widget{LineEdit{AssignTo: &a.intervalLE, Text: "1000", MaxLength: 7, StretchFactor: 1}, Label{Text: "ms"}}},
+								VSpacer{Row: 6, Column: 0, ColumnSpan: 2},
+								PushButton{AssignTo: &a.sendBtn, Text: "发送", MinSize: Size{Height: 34}, Row: 7, Column: 0, ColumnSpan: 2, OnClicked: a.send},
+							}},
+						}},
 					}},
-					Composite{AssignTo: &a.tcpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "服务器", Row: 0, Column: 0},
-						LineEdit{AssignTo: &a.tcpHostLE, Text: "127.0.0.1", MinSize: Size{Width: 120}, Row: 0, Column: 1, StretchFactor: 1},
-						Label{Text: "端口", Row: 0, Column: 2},
-						LineEdit{AssignTo: &a.tcpPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 0, Column: 3},
-						CheckBox{AssignTo: &a.tcpBindLocalCB, Text: "指定本地地址", Row: 1, Column: 0, OnCheckedChanged: a.updateControls},
-						LineEdit{AssignTo: &a.tcpLocalHostLE, Text: "0.0.0.0", MinSize: Size{Width: 120}, Row: 1, Column: 1, StretchFactor: 1},
-						Label{Text: "端口", Row: 1, Column: 2},
-						LineEdit{AssignTo: &a.tcpLocalPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 1, Column: 3},
-						HSpacer{Row: 0, Column: 4, RowSpan: 2},
-					}},
-					Composite{AssignTo: &a.udpBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "对端 IP", Row: 0, Column: 0},
-						LineEdit{AssignTo: &a.udpRemoteHostLE, Text: "127.0.0.1", MinSize: Size{Width: 120}, Row: 0, Column: 1, StretchFactor: 1},
-						Label{Text: "端口", Row: 0, Column: 2},
-						LineEdit{AssignTo: &a.udpRemotePortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 0, Column: 3},
-						CheckBox{AssignTo: &a.udpBindLocalCB, Text: "指定本地地址", Row: 1, Column: 0, OnCheckedChanged: a.updateControls},
-						LineEdit{AssignTo: &a.udpLocalHostLE, Text: "0.0.0.0", MinSize: Size{Width: 120}, Row: 1, Column: 1, StretchFactor: 1},
-						Label{Text: "端口", Row: 1, Column: 2},
-						LineEdit{AssignTo: &a.udpLocalPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 60}, MaxSize: Size{Width: 75}, Row: 1, Column: 3},
-						HSpacer{Row: 0, Column: 4, RowSpan: 2},
-					}},
-					Composite{AssignTo: &a.tcpServerBasic, Visible: false, StretchFactor: 1, Layout: Grid{Columns: 5, MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "监听 IP", Row: 0, Column: 0},
-						LineEdit{AssignTo: &a.tcpServerHostLE, Text: "0.0.0.0", MinSize: Size{Width: 160}, Row: 0, Column: 1, StretchFactor: 1},
-						Label{Text: "端口", Row: 0, Column: 2},
-						LineEdit{AssignTo: &a.tcpServerPortLE, Text: "8080", MaxLength: 5, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, Row: 0, Column: 3},
-						HSpacer{Row: 0, Column: 4},
+					Composite{AssignTo: &a.terminalPanel, Visible: false, Layout: VBox{MarginsZero: true, Spacing: 6}, Children: []Widget{
+						Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
+							HSpacer{}, PushButton{Text: "退出终端模式", MinSize: Size{Width: 112}, OnClicked: func() { a.termModeCB.SetChecked(false) }},
+						}},
+						Composite{AssignTo: &a.terminalHost, StretchFactor: 1, Layout: VBox{MarginsZero: true}},
 					}},
 				}},
-				CheckBox{AssignTo: &a.autoReconnectCB, Text: "断线自动重连", Checked: true, Row: 0, Column: 3},
-				PushButton{AssignTo: &a.openBtn, Text: "打开串口", MinSize: Size{Width: 104}, Row: 0, Column: 4, OnClicked: a.togglePort},
-			}},
-			Composite{AssignTo: &a.serialOptions, Layout: Grid{Columns: 12, MarginsZero: true, Spacing: 7}, Children: []Widget{
-				Label{Text: "数据位", Row: 0, Column: 0},
-				ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 55}, Row: 0, Column: 1},
-				Label{Text: "校验", Row: 0, Column: 2},
-				ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, MinSize: Size{Width: 65}, MaxSize: Size{Width: 78}, Row: 0, Column: 3},
-				Label{Text: "停止位", Row: 0, Column: 4},
-				ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, MinSize: Size{Width: 48}, MaxSize: Size{Width: 58}, Row: 0, Column: 5},
-				Label{Text: "流控", Row: 0, Column: 6},
-				ComboBox{AssignTo: &a.flowCB, Model: []string{"无", "RTS/CTS", "XON/XOFF"}, MinSize: Size{Width: 78}, MaxSize: Size{Width: 92}, Row: 0, Column: 7},
-				CheckBox{AssignTo: &a.dtrCB, Text: "DTR", Row: 0, Column: 8},
-				CheckBox{AssignTo: &a.rtsCB, Text: "RTS", Row: 0, Column: 9},
-				HSpacer{Row: 0, Column: 10, ColumnSpan: 2},
 			}},
 		},
 	}.Create()
@@ -293,8 +299,8 @@ func (a *app) openFailed(err error) {
 }
 
 func (a *app) isTCP() bool       { return a.connectionTypeCB.CurrentIndex() == 1 }
-func (a *app) isUDP() bool       { return a.connectionTypeCB.CurrentIndex() == 2 }
-func (a *app) isTCPServer() bool { return a.connectionTypeCB.CurrentIndex() == 3 }
+func (a *app) isTCPServer() bool { return a.connectionTypeCB.CurrentIndex() == 2 }
+func (a *app) isUDP() bool       { return a.connectionTypeCB.CurrentIndex() == 3 }
 func (a *app) isNetwork() bool   { return a.isTCP() || a.isUDP() || a.isTCPServer() }
 
 func (a *app) networkAddress() (string, error) {
@@ -554,14 +560,15 @@ func (a *app) refreshPorts() {
 }
 
 func (a *app) connectionTypeChanged() {
-	if a.serialBasic == nil || a.tcpBasic == nil || a.udpBasic == nil || a.tcpServerBasic == nil || a.serialOptions == nil {
+	if a.serialBasic == nil || a.tcpBasic == nil || a.udpBasic == nil || a.tcpServerBasic == nil || a.modeSettingsGB == nil || a.settingsPanel == nil {
 		return
 	}
 	a.serialBasic.SetVisible(!a.isNetwork())
-	a.serialOptions.SetVisible(!a.isNetwork())
 	a.tcpBasic.SetVisible(a.isTCP())
-	a.udpBasic.SetVisible(a.isUDP())
 	a.tcpServerBasic.SetVisible(a.isTCPServer())
+	a.udpBasic.SetVisible(a.isUDP())
+	a.modeSettingsGB.Layout().Update(true)
+	a.settingsPanel.Layout().Update(true)
 	a.updateControls()
 }
 func (a *app) clearReceive() {
@@ -679,13 +686,13 @@ func setTextEditWrap(te *wrapedit.Edit, wrap bool) {
 }
 
 func (a *app) termModeChanged() {
-	if a.terminalHost == nil || a.contentSplitter == nil {
+	if a.terminalPanel == nil || a.contentSplitter == nil || a.rightPanel == nil {
 		return
 	}
 	term := a.termModeCB.Checked()
-	a.receiveTools.SetVisible(!term)
 	a.contentSplitter.SetVisible(!term)
-	a.terminalHost.SetVisible(term)
+	a.terminalPanel.SetVisible(term)
+	a.rightPanel.Layout().Update(true)
 	if term {
 		if a.cycleCB.Checked() {
 			a.cycleCB.SetChecked(false)
@@ -799,7 +806,15 @@ func (a *app) showError(err error) {
 }
 
 func (a *app) loadSettings() {
-	setIndex(a.connectionTypeCB, config.LoadInt("ConnectionType", 0))
+	connectionType := config.LoadInt("ConnectionType", 0)
+	if config.LoadInt("ConnectionTypeOrder", 0) == 0 {
+		if connectionType == 2 {
+			connectionType = 3
+		} else if connectionType == 3 {
+			connectionType = 2
+		}
+	}
+	setIndex(a.connectionTypeCB, connectionType)
 	a.portCB.SetText(config.Load("Port", "COM1"))
 	a.tcpHostLE.SetText(config.Load("TCPHost", "127.0.0.1"))
 	a.tcpPortLE.SetText(config.Load("TCPPort", "8080"))
@@ -836,6 +851,7 @@ func (a *app) loadSettings() {
 }
 func (a *app) saveSettings() {
 	config.SaveInt("ConnectionType", a.connectionTypeCB.CurrentIndex())
+	config.SaveInt("ConnectionTypeOrder", 1)
 	config.Save("Port", a.portCB.Text())
 	config.Save("TCPHost", a.tcpHostLE.Text())
 	config.Save("TCPPort", a.tcpPortLE.Text())

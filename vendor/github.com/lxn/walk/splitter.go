@@ -362,19 +362,29 @@ func (s *Splitter) onInsertedWidget(index int, widget Widget) (err error) {
 						prev := s.children.At(handleIndex - 1)
 						bp := prev.Bounds()
 						msep := minSizeEffective(prev)
+						mxsep := prev.MaxSize()
 
 						next := s.children.At(handleIndex + 1)
 						bn := next.Bounds()
 						msen := minSizeEffective(next)
+						mxsen := next.MaxSize()
 
 						if s.Orientation() == Horizontal {
 							xh := s.draggedHandle.X()
 
 							xnew := xh + x - s.mouseDownPos.X
-							if xnew < bp.X+msep.Width {
-								xnew = bp.X + msep.Width
-							} else if xnew >= bn.X+bn.Width-msen.Width-s.handleWidth {
-								xnew = bn.X + bn.Width - msen.Width - s.handleWidth
+							minX := bp.X + msep.Width
+							maxX := bn.X + bn.Width - msen.Width - s.handleWidth
+							if mxsen.Width > 0 {
+								minX = maxi(minX, bn.X+bn.Width-mxsen.Width-s.handleWidth)
+							}
+							if mxsep.Width > 0 {
+								maxX = mini(maxX, bp.X+mxsep.Width)
+							}
+							if xnew < minX {
+								xnew = minX
+							} else if xnew > maxX {
+								xnew = maxX
 							}
 
 							if e := s.draggedHandle.SetX(xnew); e != nil {
@@ -384,10 +394,18 @@ func (s *Splitter) onInsertedWidget(index int, widget Widget) (err error) {
 							yh := s.draggedHandle.Y()
 
 							ynew := yh + y - s.mouseDownPos.Y
-							if ynew < bp.Y+msep.Height {
-								ynew = bp.Y + msep.Height
-							} else if ynew >= bn.Y+bn.Height-msen.Height-s.handleWidth {
-								ynew = bn.Y + bn.Height - msen.Height - s.handleWidth
+							minY := bp.Y + msep.Height
+							maxY := bn.Y + bn.Height - msen.Height - s.handleWidth
+							if mxsen.Height > 0 {
+								minY = maxi(minY, bn.Y+bn.Height-mxsen.Height-s.handleWidth)
+							}
+							if mxsep.Height > 0 {
+								maxY = mini(maxY, bp.Y+mxsep.Height)
+							}
+							if ynew < minY {
+								ynew = minY
+							} else if ynew > maxY {
+								ynew = maxY
 							}
 
 							if e := s.draggedHandle.SetY(ynew); e != nil {
