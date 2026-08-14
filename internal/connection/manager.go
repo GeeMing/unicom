@@ -30,11 +30,17 @@ type Event struct {
 	Message string
 }
 
+type DataEvent struct {
+	Data   []byte
+	Source string
+}
+
 type Manager struct {
 	mu               sync.Mutex
 	writeMu          sync.Mutex
 	connection       io.ReadWriteCloser
 	listener         net.Listener
+	clients          map[net.Conn]struct{}
 	serialPort       *serialwin.Port
 	config           serialwin.Config
 	tcpLocalAddress  string
@@ -49,17 +55,18 @@ type Manager struct {
 	cancel           context.CancelFunc
 	wake             chan struct{}
 	wg               sync.WaitGroup
-	onData           func([]byte)
+	onData           func(DataEvent)
 	onEvent          func(Event)
 	onTX             func(int)
 }
 
-func New(onData func([]byte), onEvent func(Event), onTX func(int)) *Manager {
+func New(onData func(DataEvent), onEvent func(Event), onTX func(int)) *Manager {
 	return &Manager{
 		onData:  onData,
 		onEvent: onEvent,
 		onTX:    onTX,
 		wake:    make(chan struct{}, 1),
+		clients: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -166,10 +173,15 @@ func (m *Manager) stopCurrent() {
 	m.generation++
 	p := m.connection
 	listener := m.listener
+	clients := make([]net.Conn, 0, len(m.clients))
+	for client := range m.clients {
+		clients = append(clients, client)
+	}
 	cancel := m.cancel
 	m.cancel = nil
 	m.connection = nil
 	m.listener = nil
+	m.clients = make(map[net.Conn]struct{})
 	m.serialPort = nil
 	m.mu.Unlock()
 
@@ -181,6 +193,9 @@ func (m *Manager) stopCurrent() {
 	}
 	if listener != nil {
 		_ = listener.Close()
+	}
+	for _, client := range clients {
+		_ = client.Close()
 	}
 	m.signal()
 	m.wg.Wait()
@@ -299,8 +314,8 @@ func (m *Manager) runTCPServer(ctx context.Context, gen uint64, address string) 
 		_ = listener.Close()
 	}()
 
+	m.emit(Event{StateWaiting, "TCP 服务端正在监听 " + listener.Addr().String() + "，等待客户端"})
 	for {
-		m.emit(Event{StateWaiting, "TCP 服务端正在监听 " + listener.Addr().String() + "，等待客户端"})
 		c, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() == nil {
@@ -315,23 +330,36 @@ func (m *Manager) runTCPServer(ctx context.Context, gen uint64, address string) 
 			_ = c.Close()
 			return
 		}
-		m.connection = c
-		m.serialPort = nil
+		m.clients[c] = struct{}{}
+		clientCount := len(m.clients)
+		m.wg.Add(1)
 		m.mu.Unlock()
-		m.emit(Event{StateConnected, "TCP 客户端 " + c.RemoteAddr().String() + " 已连接"})
+		m.emit(Event{StateConnected, fmt.Sprintf("TCP 客户端 %s 已连接，当前 %d 个客户端", c.RemoteAddr().String(), clientCount)})
+		go m.readTCPServerClient(gen, c)
+	}
+}
 
-		err = m.readLoop(gen, c)
-		m.mu.Lock()
-		if m.connection == c {
-			m.connection = nil
-		}
-		active := m.wanted && gen == m.generation
-		m.mu.Unlock()
-		_ = c.Close()
-		if !active {
-			return
-		}
-		m.emit(Event{StateWaiting, fmt.Sprintf("TCP 客户端已断开: %v", err)})
+func (m *Manager) readTCPServerClient(gen uint64, c net.Conn) {
+	defer m.wg.Done()
+	source := c.RemoteAddr().String()
+	err := m.readLoopFrom(gen, c, source, func() bool {
+		_, exists := m.clients[c]
+		return exists
+	})
+
+	m.mu.Lock()
+	delete(m.clients, c)
+	active := m.wanted && gen == m.generation
+	remaining := len(m.clients)
+	m.mu.Unlock()
+	_ = c.Close()
+	if !active {
+		return
+	}
+	if remaining > 0 {
+		m.emit(Event{StateConnected, fmt.Sprintf("TCP 客户端 %s 已断开，当前 %d 个客户端", source, remaining)})
+	} else {
+		m.emit(Event{StateWaiting, fmt.Sprintf("TCP 客户端 %s 已断开: %v", source, err)})
 	}
 }
 
@@ -349,9 +377,9 @@ func (m *Manager) connectUDP(ctx context.Context, gen uint64, localAddress, remo
 		remote, err = net.ResolveUDPAddr("udp", remoteAddress)
 		if err == nil {
 			var c *net.UDPConn
-			c, err = net.DialUDP("udp", local, remote)
+			c, err = net.ListenUDP("udp", local)
 			if err == nil {
-				return m.useUDPConnection(ctx, gen, c, localAddress, remoteAddress)
+				return m.useUDPConnection(ctx, gen, c, remote, localAddress, remoteAddress)
 			}
 		}
 	}
@@ -362,21 +390,31 @@ func (m *Manager) connectUDP(ctx context.Context, gen uint64, localAddress, remo
 	return m.waitRetry(gen, 2*time.Second)
 }
 
-func (m *Manager) useUDPConnection(ctx context.Context, gen uint64, c *net.UDPConn, localAddress, remoteAddress string) bool {
+type udpConnection struct {
+	*net.UDPConn
+	remote *net.UDPAddr
+}
+
+func (c *udpConnection) Write(p []byte) (int, error) {
+	return c.WriteToUDP(p, c.remote)
+}
+
+func (m *Manager) useUDPConnection(ctx context.Context, gen uint64, c *net.UDPConn, remote *net.UDPAddr, localAddress, remoteAddress string) bool {
+	endpoint := &udpConnection{UDPConn: c, remote: remote}
 	m.mu.Lock()
 	if !m.wanted || gen != m.generation {
 		m.mu.Unlock()
 		_ = c.Close()
 		return false
 	}
-	m.connection = c
+	m.connection = endpoint
 	m.serialPort = nil
 	m.mu.Unlock()
 	m.emit(Event{StateConnected, "UDP 本地 " + c.LocalAddr().String() + "，对端 " + remoteAddress})
 
-	err := m.readLoop(gen, c)
+	err := m.readUDPLoop(gen, endpoint)
 	m.mu.Lock()
-	if m.connection == c {
+	if m.connection == endpoint {
 		m.connection = nil
 	}
 	wanted := m.wanted && gen == m.generation
@@ -387,6 +425,28 @@ func (m *Manager) useUDPConnection(ctx context.Context, gen uint64, c *net.UDPCo
 	}
 	m.emit(Event{StateWaiting, fmt.Sprintf("UDP 连接中断: %v；2 秒后重试", err)})
 	return m.waitRetry(gen, 2*time.Second)
+}
+
+func (m *Manager) readUDPLoop(gen uint64, c *udpConnection) error {
+	buf := make([]byte, 65535)
+	for {
+		n, source, err := c.ReadFromUDP(buf)
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			m.emitData(DataEvent{Data: data, Source: source.String()})
+		}
+		if err != nil {
+			return err
+		}
+
+		m.mu.Lock()
+		active := m.wanted && gen == m.generation && m.connection == c
+		m.mu.Unlock()
+		if !active {
+			return errors.New("UDP 连接已关闭")
+		}
+	}
 }
 
 func (m *Manager) connectNetwork(ctx context.Context, gen uint64, mode, localAddress, address string) bool {
@@ -437,20 +497,24 @@ func (m *Manager) connectNetwork(ctx context.Context, gen uint64, mode, localAdd
 }
 
 func (m *Manager) readLoop(gen uint64, p io.ReadWriteCloser) error {
+	return m.readLoopFrom(gen, p, "", func() bool { return m.connection == p })
+}
+
+func (m *Manager) readLoopFrom(gen uint64, p io.ReadWriteCloser, source string, connected func() bool) error {
 	buf := make([]byte, 8192)
 	for {
 		n, err := p.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			m.onData(data)
+			m.emitData(DataEvent{Data: data, Source: source})
 		}
 		if err != nil {
 			return err
 		}
 
 		m.mu.Lock()
-		active := m.wanted && gen == m.generation && m.connection == p
+		active := m.wanted && gen == m.generation && connected()
 		mode := m.mode
 		m.mu.Unlock()
 		if !active {
@@ -568,12 +632,37 @@ func (m *Manager) Write(data []byte) error {
 	p := m.connection
 	wanted := m.wanted
 	mode := m.mode
+	clients := make([]net.Conn, 0, len(m.clients))
+	if mode == "tcp-server" {
+		for client := range m.clients {
+			clients = append(clients, client)
+		}
+	}
 	m.mu.Unlock()
-	if !wanted || p == nil {
+	if !wanted || (p == nil && len(clients) == 0) {
 		return errors.New("连接未建立")
 	}
 
 	m.writeMu.Lock()
+	if mode == "tcp-server" {
+		var firstErr error
+		total := 0
+		for _, client := range clients {
+			n, err := io.Copy(client, bytes.NewReader(data))
+			total += int(n)
+			if err != nil && firstErr == nil {
+				firstErr = err
+				_ = client.Close()
+			} else if n != int64(len(data)) && firstErr == nil {
+				firstErr = errors.New("TCP 服务端只发送了部分数据")
+			}
+		}
+		m.writeMu.Unlock()
+		if total > 0 && m.onTX != nil {
+			m.onTX(total)
+		}
+		return firstErr
+	}
 	n, err := io.Copy(p, bytes.NewReader(data))
 	m.writeMu.Unlock()
 	if n > 0 && m.onTX != nil {
@@ -618,7 +707,13 @@ func (m *Manager) SetRTS(enabled bool) error {
 func (m *Manager) Connected() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.connection != nil
+	return m.connection != nil || len(m.clients) > 0
+}
+
+func (m *Manager) emitData(event DataEvent) {
+	if m.onData != nil {
+		m.onData(event)
+	}
 }
 
 func (m *Manager) emit(e Event) {

@@ -43,6 +43,7 @@ type app struct {
 	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                    *walk.PushButton
 	tcpLocalHostPicker, tcpServerHostPicker, udpLocalHostPicker        *walk.ToolButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB  *walk.CheckBox
+	markSenderCB                                                       *walk.CheckBox
 	hexTXCB, escapeCB, cycleCB, termModeCB, wrapRXCB, wrapTXCB         *walk.CheckBox
 	tcpBindLocalCB, udpBindLocalCB                                     *walk.CheckBox
 	receiveTE, sendTE                                                  *wrapedit.Edit
@@ -73,6 +74,17 @@ type app struct {
 	termEncoding       string
 	cycleStop          chan struct{}
 	localIPOptions     []localIPOption
+	receiveChunks      []receiveChunk
+	receiveChunkBytes  int
+	nextReceiveSeq     uint64
+	lastMarkedSeq      uint64
+}
+
+type receiveChunk struct {
+	sequence uint64
+	source   string
+	data     []byte
+	received time.Time
 }
 
 var encodings = []string{"UTF-8", "GBK", "GB18030", "Big5", "ASCII", "UTF-16LE", "UTF-16BE"}
@@ -198,6 +210,7 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.termModeCB, Text: "终端模式", OnCheckedChanged: a.termModeChanged}, HSpacer{}}},
 								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.autoScrollCB, Text: "自动滚动", Checked: true}, HSpacer{}}},
 								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.timestampCB, Text: "显示接收时间戳", OnCheckedChanged: a.renderAll}, HSpacer{}}},
+								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.markSenderCB, Text: "标记发送者", OnCheckedChanged: a.renderAll}, HSpacer{}}},
 								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.hexRXCB, Text: "HEX 显示", OnCheckedChanged: a.renderAll}, HSpacer{}}},
 								Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{CheckBox{AssignTo: &a.wrapRXCB, Text: "自动换行", Checked: true, OnCheckedChanged: a.updateReceiveWrap}, HSpacer{}}},
 								VSpacer{},
@@ -445,7 +458,11 @@ func (a *app) onConnectionEvent(e connection.Event) {
 			return
 		}
 		a.mu.Lock()
-		a.connected = e.State == connection.StateConnected
+		connected := e.State == connection.StateConnected
+		if a.isTCPServer() && e.State != connection.StateClosed {
+			connected = a.manager.Connected()
+		}
+		a.connected = connected
 		a.opening = e.State != connection.StateClosed
 		a.mu.Unlock()
 		a.statusItem.SetText(e.Message)
@@ -453,8 +470,25 @@ func (a *app) onConnectionEvent(e connection.Event) {
 	})
 }
 
-func (a *app) onData(p []byte) { a.buffer.Append(p); a.scheduleRender() }
-func (a *app) onTX(n int)      { a.mu.Lock(); a.txBytes += uint64(n); a.mu.Unlock() }
+func (a *app) onData(event connection.DataEvent) {
+	a.mu.Lock()
+	a.buffer.Append(event.Data)
+	a.nextReceiveSeq++
+	a.receiveChunks = append(a.receiveChunks, receiveChunk{
+		sequence: a.nextReceiveSeq,
+		source:   event.Source,
+		data:     event.Data,
+		received: time.Now(),
+	})
+	a.receiveChunkBytes += len(event.Data)
+	for a.receiveChunkBytes > 2*1024*1024 && len(a.receiveChunks) > 1 {
+		a.receiveChunkBytes -= len(a.receiveChunks[0].data)
+		a.receiveChunks = a.receiveChunks[1:]
+	}
+	a.mu.Unlock()
+	a.scheduleRender()
+}
+func (a *app) onTX(n int) { a.mu.Lock(); a.txBytes += uint64(n); a.mu.Unlock() }
 func (a *app) scheduleRender() {
 	a.mu.Lock()
 	if time.Since(a.lastRender) < 60*time.Millisecond {
@@ -470,6 +504,10 @@ func (a *app) renderAll() {
 	data, rx := a.buffer.Snapshot()
 	if a.termModeCB != nil && a.termModeCB.Checked() {
 		a.replayTerminal(data, rx)
+		return
+	}
+	if a.showSenderMarkers() {
+		a.renderAllWithSenders()
 		return
 	}
 	var text string
@@ -506,6 +544,10 @@ func (a *app) renderAll() {
 func (a *app) renderPending() {
 	if a.termModeCB != nil && a.termModeCB.Checked() {
 		a.renderTerminalPending()
+		return
+	}
+	if a.showSenderMarkers() {
+		a.renderSenderPending()
 		return
 	}
 	if a.timestampCB.Checked() || a.renderEncoding != a.selectedEncoding() {
@@ -545,6 +587,94 @@ func (a *app) renderPending() {
 	}
 	a.lastShownRX = rx
 	a.updateCounters(rx)
+}
+
+func (a *app) showSenderMarkers() bool {
+	return a.markSenderCB != nil && a.markSenderCB.Checked() && (a.isTCPServer() || a.isUDP())
+}
+
+func (a *app) receiveChunksSnapshot() ([]receiveChunk, uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	chunks := make([]receiveChunk, len(a.receiveChunks))
+	copy(chunks, a.receiveChunks)
+	return chunks, a.buffer.Received()
+}
+
+func (a *app) formatReceiveChunk(chunk receiveChunk) string {
+	var b strings.Builder
+	if a.timestampCB.Checked() {
+		b.WriteString("[")
+		b.WriteString(chunk.received.Format("15:04:05.000"))
+		b.WriteString("] ")
+	}
+	if chunk.source != "" {
+		b.WriteString("[")
+		b.WriteString(chunk.source)
+		b.WriteString("] ")
+	}
+	var payload string
+	if a.hexRXCB.Checked() {
+		payload = codec.HexDump(chunk.data)
+	} else {
+		payload = codec.Decode(chunk.data, a.selectedEncoding())
+	}
+	b.WriteString(payload)
+	if !strings.HasSuffix(payload, "\r") && !strings.HasSuffix(payload, "\n") {
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
+func (a *app) renderAllWithSenders() {
+	chunks, rx := a.receiveChunksSnapshot()
+	var b strings.Builder
+	for _, chunk := range chunks {
+		b.WriteString(a.formatReceiveChunk(chunk))
+	}
+	a.pending = a.pending[:0]
+	a.renderEncoding = a.selectedEncoding()
+	a.receiveTE.SetText(b.String())
+	if len(chunks) > 0 {
+		a.lastMarkedSeq = chunks[len(chunks)-1].sequence
+	} else {
+		a.lastMarkedSeq = 0
+	}
+	a.lastShownRX = rx
+	a.updateCounters(rx)
+	if a.autoScrollCB.Checked() {
+		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
+	}
+}
+
+func (a *app) renderSenderPending() {
+	chunks, rx := a.receiveChunksSnapshot()
+	if len(chunks) == 0 {
+		a.updateCounters(rx)
+		return
+	}
+	if a.lastMarkedSeq != 0 && chunks[0].sequence > a.lastMarkedSeq+1 {
+		a.renderAllWithSenders()
+		return
+	}
+	var b strings.Builder
+	for _, chunk := range chunks {
+		if chunk.sequence <= a.lastMarkedSeq {
+			continue
+		}
+		b.WriteString(a.formatReceiveChunk(chunk))
+		a.lastMarkedSeq = chunk.sequence
+	}
+	if b.Len() > 0 {
+		a.receiveTE.AppendText(b.String())
+	}
+	a.lastShownRX = rx
+	a.updateCounters(rx)
+	if a.receiveTE.TextLength() > 2*1024*1024 {
+		a.renderAllWithSenders()
+	} else if a.autoScrollCB.Checked() {
+		a.receiveTE.SetTextSelection(a.receiveTE.TextLength(), a.receiveTE.TextLength())
+	}
 }
 
 func (a *app) send() {
@@ -649,9 +779,17 @@ func (a *app) connectionTypeChanged() {
 	a.modeSettingsGB.Layout().Update(true)
 	a.settingsPanel.Layout().Update(true)
 	a.updateControls()
+	if a.receiveTE != nil {
+		a.renderAll()
+	}
 }
 func (a *app) clearReceive() {
+	a.mu.Lock()
 	a.buffer.Clear()
+	a.receiveChunks = nil
+	a.receiveChunkBytes = 0
+	a.lastMarkedSeq = 0
+	a.mu.Unlock()
 	a.pending = a.pending[:0]
 	a.termPending = a.termPending[:0]
 	a.termLastRX = 0
@@ -701,6 +839,7 @@ func (a *app) updateControls() {
 	a.sendBtn.SetEnabled(connected)
 	a.connectionTypeCB.SetEnabled(!opening)
 	a.autoReconnectCB.SetEnabled(!opening && !a.isTCPServer())
+	a.markSenderCB.SetEnabled(a.isTCPServer() || a.isUDP())
 	a.refreshBtn.SetEnabled(!opening && !a.isNetwork())
 	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
@@ -922,6 +1061,7 @@ func (a *app) loadSettings() {
 	a.dtrCB.SetChecked(config.LoadInt("DTR", 0) != 0)
 	a.rtsCB.SetChecked(config.LoadInt("RTS", 0) != 0)
 	a.autoReconnectCB.SetChecked(config.LoadInt("AutoReconnect", 1) != 0)
+	a.markSenderCB.SetChecked(config.LoadInt("MarkSender", 0) != 0)
 	a.escapeCB.SetChecked(config.LoadInt("Escape", 0) != 0)
 	a.wrapRXCB.SetChecked(config.LoadInt("WrapRX", 1) != 0)
 	a.wrapTXCB.SetChecked(config.LoadInt("WrapTX", 1) != 0)
@@ -959,6 +1099,7 @@ func (a *app) saveSettings() {
 	saveBool("DTR", a.dtrCB.Checked())
 	saveBool("RTS", a.rtsCB.Checked())
 	saveBool("AutoReconnect", a.autoReconnectCB.Checked())
+	saveBool("MarkSender", a.markSenderCB.Checked())
 	saveBool("Escape", a.escapeCB.Checked())
 	saveBool("WrapRX", a.wrapRXCB.Checked())
 	saveBool("WrapTX", a.wrapTXCB.Checked())
