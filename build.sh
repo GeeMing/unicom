@@ -11,10 +11,9 @@ case "${1:-}" in
     ;;
 esac
 
-
-VERSION="0.0.1"
-GIT_HASH=$(printf '%s@%.7s' "$(git symbolic-ref --short -q HEAD)" "$(git log -1 --format=%H)")
-BUILD_TIME=$(date '+%Y-%m-%d_%H:%M:%S_%z')
+VERSION=$(git describe --tags --exact-match 2>/dev/null || true)
+GIT_HASH=$(printf '%s@%.7s' "$(git symbolic-ref --short -q HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)" "$(git log -1 --format=%H 2>/dev/null)")
+BUILD_TIME=$(date '+%Y-%m-%d_%H:%M:%S')
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILD_ROOT="$PROJECT_ROOT/build"
@@ -109,8 +108,13 @@ if [[ "$SKIP_TESTS" -eq 0 ]]; then
 fi
 
 OUTPUT_WIN="$(cygpath -w "$OUTPUT")"
-LDFLAGS="-H windowsgui -s -w -X main.GIT_HASH=$GIT_HASH -X main.BUILD_TIME=$BUILD_TIME"
+LDFLAGS="-H windowsgui -s -w -X main.VERSION=$VERSION -X main.GIT_HASH=$GIT_HASH -X main.BUILD_TIME=$BUILD_TIME"
 "$GO_EXE" build -ldflags "$LDFLAGS" -o "$OUTPUT_WIN" unicom
 
 SIZE="$(stat -c '%s' "$OUTPUT")"
-printf 'Build complete: %s (%s bytes)\nVersion: %s | %s | %s\n' "$OUTPUT" "$SIZE" "$GIT_HASH" "$BUILD_TIME"
+if [[ -n "$VERSION" ]]; then
+  DISPLAY_VERSION="$VERSION | $GIT_HASH | $BUILD_TIME"
+else
+  DISPLAY_VERSION="$GIT_HASH | $BUILD_TIME"
+fi
+printf 'Build complete: %s (%s bytes)\nVersion: %s\n' "$OUTPUT" "$SIZE" "$DISPLAY_VERSION"

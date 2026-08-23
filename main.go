@@ -30,11 +30,22 @@ import (
 const appName = "UniCom 通信调试助手"
 
 var (
-	VERSION    = "0.0.2"
+	VERSION    = ""
 	GIT_HASH   = "unknown"
 	BUILD_TIME = "unknown"
-	appTitle   = fmt.Sprintf("%s v%s | %s | %s", appName, VERSION, GIT_HASH, BUILD_TIME)
+	appTitle   = formatAppTitle()
 )
+
+func formatAppTitle() string {
+	if VERSION != "" {
+		v := VERSION
+		if !strings.HasPrefix(strings.ToLower(v), "v") {
+			v = "v" + v
+		}
+		return fmt.Sprintf("%s %s | %s | %s", appName, v, GIT_HASH, BUILD_TIME)
+	}
+	return fmt.Sprintf("%s | %s | %s", appName, GIT_HASH, BUILD_TIME)
+}
 
 type app struct {
 	mw                                                                 *walk.MainWindow
