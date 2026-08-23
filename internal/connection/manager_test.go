@@ -171,3 +171,15 @@ func waitForState(t *testing.T, events <-chan Event, state State) {
 		}
 	}
 }
+
+func TestSetBaudRateUpdatesConfig(t *testing.T) {
+	m := New(nil, nil, nil)
+	m.config.BaudRate = 9600
+	if err := m.SetBaudRate(115200); err != nil {
+		t.Fatalf("SetBaudRate failed: %v", err)
+	}
+	if m.config.BaudRate != 115200 {
+		t.Fatalf("expected BaudRate to be 115200, got %d", m.config.BaudRate)
+	}
+}
+

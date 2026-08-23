@@ -168,7 +168,7 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 							Label{Text: "端口号", Row: 0, Column: 0}, Composite{Row: 0, Column: 1, Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
 								ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, StretchFactor: 1}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
 							}},
-							Label{Text: "波特率", Row: 1, Column: 0}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, Row: 1, Column: 1},
+							Label{Text: "波特率", Row: 1, Column: 0}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, Row: 1, Column: 1, OnCurrentIndexChanged: a.baudChanged, OnEditingFinished: a.baudChanged},
 							Label{Text: "数据位", Row: 2, Column: 0}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, Row: 2, Column: 1},
 							Label{Text: "校验位", Row: 3, Column: 0}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, Row: 3, Column: 1},
 							Label{Text: "停止位", Row: 4, Column: 0}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, Row: 4, Column: 1},
@@ -884,9 +884,10 @@ func (a *app) updateControls() {
 	a.autoReconnectCB.SetEnabled(!opening && !a.isTCPServer())
 	a.markSenderCB.SetEnabled(a.isTCPServer() || a.isUDP())
 	a.refreshBtn.SetEnabled(!opening && !a.isNetwork())
-	for _, w := range []walk.Widget{a.portCB, a.baudCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
+	for _, w := range []walk.Widget{a.portCB, a.dataCB, a.parityCB, a.stopCB, a.flowCB} {
 		w.SetEnabled(!opening)
 	}
+	a.baudCB.SetEnabled(!a.isNetwork())
 	a.tcpHostLE.SetEnabled(!opening)
 	a.tcpPortLE.SetEnabled(!opening)
 	a.tcpBindLocalCB.SetEnabled(!opening)
@@ -904,6 +905,37 @@ func (a *app) updateControls() {
 	a.tcpServerPortLE.SetEnabled(!opening)
 	a.dtrCB.SetEnabled(connected && !a.isNetwork())
 	a.rtsCB.SetEnabled(connected && !a.isNetwork())
+}
+
+func (a *app) baudChanged() {
+	baudStr := strings.TrimSpace(a.baudCB.Text())
+	if baudStr == "" {
+		return
+	}
+	baud, err := strconv.Atoi(baudStr)
+	if err != nil || baud <= 0 {
+		return
+	}
+	config.Save("Baud", baudStr)
+	if a.manager == nil {
+		return
+	}
+	a.mu.Lock()
+	opening := a.opening
+	a.mu.Unlock()
+	if !opening || a.isNetwork() {
+		return
+	}
+	if err := a.manager.SetBaudRate(uint32(baud)); err != nil {
+		a.statusItem.SetText(fmt.Sprintf("波特率切换失败: %v", err))
+	} else {
+		portName := strings.TrimSpace(a.portCB.Text())
+		if portName != "" {
+			a.statusItem.SetText(fmt.Sprintf("%s 波特率已切换为 %d", portName, baud))
+		} else {
+			a.statusItem.SetText(fmt.Sprintf("波特率已切换为 %d", baud))
+		}
+	}
 }
 
 func (a *app) dtrChanged() {

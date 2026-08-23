@@ -682,6 +682,17 @@ func (m *Manager) Write(data []byte) error {
 	return nil
 }
 
+func (m *Manager) SetBaudRate(baud uint32) error {
+	m.mu.Lock()
+	m.config.BaudRate = baud
+	p := m.serialPort
+	m.mu.Unlock()
+	if p == nil {
+		return nil
+	}
+	return p.SetBaudRate(baud)
+}
+
 func (m *Manager) SetDTR(enabled bool) error {
 	m.mu.Lock()
 	p := m.serialPort

@@ -183,6 +183,30 @@ func (p *Port) setLineState(command uintptr) error {
 	return nil
 }
 
+func (p *Port) SetBaudRate(baud uint32) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("串口已关闭")
+	}
+	h := p.h
+	p.mu.Unlock()
+
+	var d dcb
+	d.Length = uint32(unsafe.Sizeof(d))
+	r, _, e := getCommState.Call(uintptr(h), uintptr(unsafe.Pointer(&d)))
+	if r == 0 {
+		return fmt.Errorf("读取串口参数失败: %v", e)
+	}
+	d.BaudRate = baud
+	r, _, e = setCommState.Call(uintptr(h), uintptr(unsafe.Pointer(&d)))
+	if r == 0 {
+		return fmt.Errorf("设置串口波特率失败: %v", e)
+	}
+	purgeComm.Call(uintptr(h), 0x0004|0x0008)
+	return nil
+}
+
 func (p *Port) SetDTR(enabled bool) error {
 	if enabled {
 		return p.setLineState(setDTR)
