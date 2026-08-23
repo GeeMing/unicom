@@ -19,15 +19,61 @@ BUILD_TIME=$(date '+%Y-%m-%d_%H:%M:%S_%z')
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILD_ROOT="$PROJECT_ROOT/build"
 STAGE="$BUILD_ROOT/gopath/src/unicom"
-GO_EXE="$PROJECT_ROOT/.tools/go1.10.8/go/bin/go.exe"
+# Check and install go1.10.8 if needed
+if ! command -v go1.10.8 >/dev/null 2>&1; then
+  if command -v go >/dev/null 2>&1; then
+    SYSTEM_GOBIN="$(go env GOBIN 2>/dev/null || true)"
+    SYSTEM_GOPATH="$(go env GOPATH 2>/dev/null || true)"
+    if [[ -n "$SYSTEM_GOBIN" && -d "$SYSTEM_GOBIN" ]]; then
+      export PATH="$SYSTEM_GOBIN:$PATH"
+    fi
+    if [[ -n "$SYSTEM_GOPATH" ]]; then
+      FIRST_GOPATH="$(echo "$SYSTEM_GOPATH" | cut -d';' -f1)"
+      if command -v cygpath >/dev/null 2>&1; then
+        FIRST_GOPATH="$(cygpath -u "$FIRST_GOPATH" 2>/dev/null || echo "$FIRST_GOPATH")"
+      fi
+      if [[ -d "$FIRST_GOPATH/bin" ]]; then
+        export PATH="$FIRST_GOPATH/bin:$PATH"
+      fi
+    fi
+  fi
+fi
+
+if ! command -v go1.10.8 >/dev/null 2>&1; then
+  echo "go1.10.8 not found. Installing via 'go install golang.org/dl/go1.10.8@latest'..."
+  if ! command -v go >/dev/null 2>&1; then
+    echo "Error: 'go' is required to install go1.10.8, but was not found in PATH." >&2
+    exit 1
+  fi
+  go install golang.org/dl/go1.10.8@latest
+
+  SYSTEM_GOBIN="$(go env GOBIN 2>/dev/null || true)"
+  SYSTEM_GOPATH="$(go env GOPATH 2>/dev/null || true)"
+  if [[ -n "$SYSTEM_GOBIN" && -d "$SYSTEM_GOBIN" ]]; then
+    export PATH="$SYSTEM_GOBIN:$PATH"
+  fi
+  if [[ -n "$SYSTEM_GOPATH" ]]; then
+    FIRST_GOPATH="$(echo "$SYSTEM_GOPATH" | cut -d';' -f1)"
+    if command -v cygpath >/dev/null 2>&1; then
+      FIRST_GOPATH="$(cygpath -u "$FIRST_GOPATH" 2>/dev/null || echo "$FIRST_GOPATH")"
+    fi
+    if [[ -d "$FIRST_GOPATH/bin" ]]; then
+      export PATH="$FIRST_GOPATH/bin:$PATH"
+    fi
+  fi
+fi
+
+if ! command -v go1.10.8 >/dev/null 2>&1; then
+  echo "Error: Failed to find or install go1.10.8." >&2
+  exit 1
+fi
+
+go1.10.8 download
+
+GO_EXE="go1.10.8"
 RESOURCE="$PROJECT_ROOT/resources/unicom_windows_386.syso"
 OUTPUT="$BUILD_ROOT/unicom.exe"
 
-
-if [[ ! -f "$GO_EXE" ]]; then
-  echo "Go 1.10.8 was not found: $GO_EXE" >&2
-  exit 1
-fi
 if [[ ! -f "$RESOURCE" ]]; then
   echo "Windows resource was not found: $RESOURCE" >&2
   exit 1

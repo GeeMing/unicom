@@ -80,7 +80,7 @@ UniCom 是一个面向 Windows 的轻量串口、TCP 与 UDP 调试助手。项�
 
 ## 构建
 
-项目固定使用 Go 1.10.8、Walk 2018-08-27 和 Win 2018-08-21。构建工具及依赖已包含在仓库的 `.tools` 和 `vendor` 目录中。
+项目固定使用 Go 1.10.8、Walk 2018-08-27 和 Win 2018-08-21。依赖已包含在仓库的 `vendor` 目录中，`build.sh` 会在未检测到 Go 1.10.8 时自动通过 `go install golang.org/dl/go1.10.8@latest` 下载并安装所需环境。
 
 在 Git Bash 中执行：
 
