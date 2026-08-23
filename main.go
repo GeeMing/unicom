@@ -40,7 +40,7 @@ type app struct {
 	mw                                                                 *walk.MainWindow
 	connectionTypeCB, portCB, baudCB, dataCB, parityCB, stopCB, flowCB *walk.ComboBox
 	encodingCB, sendEncodingCB, lineEndingCB                           *walk.ComboBox
-	openBtn, refreshBtn, sendBtn, clearBtn, saveBtn                    *walk.PushButton
+	openBtn, refreshBtn, autoBaudBtn, sendBtn, clearBtn, saveBtn       *walk.PushButton
 	tcpLocalHostPicker, tcpServerHostPicker, udpLocalHostPicker        *walk.ToolButton
 	dtrCB, rtsCB, autoReconnectCB, hexRXCB, timestampCB, autoScrollCB  *walk.CheckBox
 	markSenderCB                                                       *walk.CheckBox
@@ -63,7 +63,9 @@ type app struct {
 	manager             *connection.Manager
 	buffer              *session.Buffer
 	mu                  sync.Mutex
-	connected, opening  bool
+	opening             bool
+	connected           bool
+	detectingBaud       bool
 	txBytes             uint64
 	lastShownRX         uint64
 	lastRender          time.Time
@@ -96,6 +98,16 @@ type receiveScrollState struct {
 }
 
 var encodings = []string{"UTF-8", "GBK", "GB18030", "Big5", "ASCII", "UTF-16LE", "UTF-16BE"}
+
+var baudRates = []string{
+	"300", "600", "1200", "2400", "4800",
+	"──────────",
+	"9600", "14400", "19200", "28800", "38400", "57600", "76800", "115200",
+	"──────────",
+	"128000", "153600", "230400", "256000", "460800", "500000", "576000", "921600",
+	"──────────",
+	"1000000", "1152000", "1500000", "2000000", "2500000", "3000000",
+}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -166,9 +178,12 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 					GroupBox{AssignTo: &a.modeSettingsGB, Title: "模式设置", Layout: VBox{Margins: Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}}, Children: []Widget{
 						Composite{AssignTo: &a.serialBasic, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 7}, Children: []Widget{
 							Label{Text: "端口号", Row: 0, Column: 0}, Composite{Row: 0, Column: 1, Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
-								ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, StretchFactor: 1}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", OnClicked: a.refreshPorts},
+								ComboBox{AssignTo: &a.portCB, Editable: true, Model: []string{}, StretchFactor: 1}, PushButton{AssignTo: &a.refreshBtn, Text: "刷新", MaxSize: Size{Width: 44}, OnClicked: a.refreshPorts},
 							}},
-							Label{Text: "波特率", Row: 1, Column: 0}, ComboBox{AssignTo: &a.baudCB, Editable: true, Model: []string{"1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"}, Row: 1, Column: 1, OnCurrentIndexChanged: a.baudChanged, OnEditingFinished: a.baudChanged},
+							Label{Text: "波特率", Row: 1, Column: 0}, Composite{Row: 1, Column: 1, Layout: HBox{MarginsZero: true, Spacing: 5}, Children: []Widget{
+								ComboBox{AssignTo: &a.baudCB, Editable: true, Model: baudRates, StretchFactor: 1, OnCurrentIndexChanged: a.baudChanged, OnEditingFinished: a.baudChanged},
+								PushButton{AssignTo: &a.autoBaudBtn, Text: "自动", MaxSize: Size{Width: 44}, OnClicked: a.detectBaudRate},
+							}},
 							Label{Text: "数据位", Row: 2, Column: 0}, ComboBox{AssignTo: &a.dataCB, Model: []string{"5", "6", "7", "8"}, Row: 2, Column: 1},
 							Label{Text: "校验位", Row: 3, Column: 0}, ComboBox{AssignTo: &a.parityCB, Model: []string{"无", "奇", "偶", "Mark", "Space"}, Row: 3, Column: 1},
 							Label{Text: "停止位", Row: 4, Column: 0}, ComboBox{AssignTo: &a.stopCB, Model: []string{"1", "1.5", "2"}, Row: 4, Column: 1},
@@ -888,6 +903,7 @@ func (a *app) updateControls() {
 		w.SetEnabled(!opening)
 	}
 	a.baudCB.SetEnabled(!a.isNetwork())
+	a.autoBaudBtn.SetEnabled(!a.isNetwork() && !a.detectingBaud)
 	a.tcpHostLE.SetEnabled(!opening)
 	a.tcpPortLE.SetEnabled(!opening)
 	a.tcpBindLocalCB.SetEnabled(!opening)
@@ -914,6 +930,9 @@ func (a *app) baudChanged() {
 	}
 	baud, err := strconv.Atoi(baudStr)
 	if err != nil || baud <= 0 {
+		if strings.HasPrefix(baudStr, "─") || strings.HasPrefix(baudStr, "-") {
+			a.baudCB.SetText(config.Load("Baud", "115200"))
+		}
 		return
 	}
 	config.Save("Baud", baudStr)
@@ -936,6 +955,64 @@ func (a *app) baudChanged() {
 			a.statusItem.SetText(fmt.Sprintf("波特率已切换为 %d", baud))
 		}
 	}
+}
+
+func (a *app) detectBaudRate() {
+	portName := strings.ToUpper(strings.TrimSpace(a.portCB.Text()))
+	if portName == "" {
+		a.showError(fmt.Errorf("请先选择或输入串口端口号"))
+		return
+	}
+	if a.detectingBaud {
+		return
+	}
+	a.detectingBaud = true
+	a.updateControls()
+	a.statusItem.SetText("正在自动检测波特率...")
+
+	a.mu.Lock()
+	wasOpen := a.opening
+	a.mu.Unlock()
+
+	go func() {
+		if wasOpen {
+			a.manager.Close()
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		detectedBaud, err := serialwin.DetectBaudRate(portName, nil, func(baud uint32) {
+			a.mw.Synchronize(func() {
+				a.statusItem.SetText(fmt.Sprintf("正在检测波特率: %d ...", baud))
+			})
+		})
+
+		a.mw.Synchronize(func() {
+			a.detectingBaud = false
+			a.updateControls()
+			if err != nil {
+				a.statusItem.SetText(err.Error())
+				if wasOpen {
+					if cfg, cfgErr := a.serialConfig(); cfgErr == nil {
+						a.manager.Open(cfg)
+					}
+				}
+				walk.MsgBox(a.mw, appTitle, err.Error(), walk.MsgBoxOK|walk.MsgBoxIconInformation)
+				return
+			}
+
+			baudStr := strconv.Itoa(int(detectedBaud))
+			a.baudCB.SetText(baudStr)
+			config.Save("Baud", baudStr)
+			a.statusItem.SetText(fmt.Sprintf("%s 自动检测成功，已匹配波特率: %d", portName, detectedBaud))
+
+			if wasOpen {
+				if cfg, cfgErr := a.serialConfig(); cfgErr == nil {
+					cfg.BaudRate = detectedBaud
+					a.manager.Open(cfg)
+				}
+			}
+		})
+	}()
 }
 
 func (a *app) dtrChanged() {

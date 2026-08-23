@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -59,6 +60,12 @@ type dcb struct {
 	Reserved1                                      uint16
 }
 
+type comStat struct {
+	flags    uint32
+	cbInQue  uint32
+	cbOutQue uint32
+}
+
 type commTimeouts struct {
 	ReadIntervalTimeout, ReadTotalTimeoutMultiplier, ReadTotalTimeoutConstant uint32
 	WriteTotalTimeoutMultiplier, WriteTotalTimeoutConstant                    uint32
@@ -73,7 +80,30 @@ var (
 	purgeComm       = kernel32.NewProc("PurgeComm")
 	queryDosDevice  = kernel32.NewProc("QueryDosDeviceW")
 	escapeComm      = kernel32.NewProc("EscapeCommFunction")
+	clearCommError  = kernel32.NewProc("ClearCommError")
 )
+
+var DefaultBaudCandidates = []uint32{
+	115200,
+	9600,
+	57600,
+	38400,
+	19200,
+	230400,
+	460800,
+	921600,
+	1500000,
+	2000000,
+	4800,
+	2400,
+	1200,
+	76800,
+	128000,
+	256000,
+	500000,
+	1000000,
+	3000000,
+}
 
 type Port struct {
 	mu     sync.Mutex
@@ -265,3 +295,123 @@ func Exists(name string) bool {
 	r, _, _ := queryDosDevice.Call(uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	return r != 0
 }
+
+func (p *Port) sample(timeoutMs uint32) ([]byte, uint32, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, 0, errors.New("串口已关闭")
+	}
+	h := p.h
+	p.mu.Unlock()
+
+	t := commTimeouts{
+		ReadIntervalTimeout:        20,
+		ReadTotalTimeoutMultiplier: 0,
+		ReadTotalTimeoutConstant:   timeoutMs,
+		WriteTotalTimeoutConstant:  1000,
+	}
+	setCommTimeouts.Call(uintptr(h), uintptr(unsafe.Pointer(&t)))
+	purgeComm.Call(uintptr(h), 0x0004|0x0008)
+
+	buf := make([]byte, 512)
+	var n uint32
+	_ = syscall.ReadFile(h, buf, &n, nil)
+
+	var commErrors uint32
+	var stat comStat
+	clearCommError.Call(uintptr(h), uintptr(unsafe.Pointer(&commErrors)), uintptr(unsafe.Pointer(&stat)))
+
+	return buf[:n], commErrors, nil
+}
+
+func ScoreSample(data []byte, commErrors uint32) float64 {
+	if len(data) == 0 {
+		return 0.0
+	}
+	// Severe penalty for framing error (0x0008)
+	if commErrors&0x0008 != 0 {
+		return 0.01
+	}
+	if commErrors&0x0004 != 0 {
+		return 0.05
+	}
+
+	printable := 0
+	suspicious := 0
+	for _, b := range data {
+		if (b >= 0x20 && b <= 0x7E) || b == '\r' || b == '\n' || b == '\t' {
+			printable++
+		} else if b == 0x00 || b == 0xFF || (b < 0x20 && b != '\r' && b != '\n' && b != '\t') {
+			suspicious++
+		}
+	}
+	ratio := float64(printable) / float64(len(data))
+	if utf8.Valid(data) && ratio > 0.5 {
+		ratio += 0.3
+	}
+	if commErrors == 0 && ratio < 0.5 {
+		return 0.6 - (float64(suspicious) / float64(len(data)) * 0.2)
+	}
+	return ratio
+}
+
+func DetectBaudRate(name string, candidates []uint32, onProgress func(baud uint32)) (uint32, error) {
+	if name == "" {
+		return 0, errors.New("请先选择或输入串口端口号")
+	}
+	if len(candidates) == 0 {
+		candidates = DefaultBaudCandidates
+	}
+
+	c := Config{
+		Name:     name,
+		BaudRate: candidates[0],
+		DataBits: 8,
+		Parity:   ParityNone,
+		StopBits: StopOne,
+		Flow:     FlowNone,
+	}
+	p, err := Open(c)
+	if err != nil {
+		return 0, err
+	}
+	defer p.Close()
+
+	var bestBaud uint32
+	var bestScore float64
+	totalBytes := 0
+
+	for _, baud := range candidates {
+		if onProgress != nil {
+			onProgress(baud)
+		}
+		if err := p.SetBaudRate(baud); err != nil {
+			continue
+		}
+		data, commErrors, err := p.sample(80)
+		if err != nil {
+			continue
+		}
+		if len(data) > 0 {
+			totalBytes += len(data)
+			score := ScoreSample(data, commErrors)
+			if score > bestScore {
+				bestScore = score
+				bestBaud = baud
+			}
+			if score >= 0.95 && len(data) >= 8 && commErrors == 0 {
+				return baud, nil
+			}
+		}
+	}
+
+	if totalBytes == 0 {
+		return 0, errors.New("未检测到任何串口数据，请确保下位机已连接并正在发送数据")
+	}
+	if bestScore > 0 && bestBaud > 0 {
+		return bestBaud, nil
+	}
+	return 0, errors.New("无法确定有效波特率，收到的数据均为乱码或错误帧")
+}
+
