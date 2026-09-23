@@ -292,6 +292,10 @@ func (a *app) createTerminal() error {
 }
 
 func (a *app) serialConfig() (serialwin.Config, error) {
+	name := strings.ToUpper(strings.TrimSpace(a.portCB.Text()))
+	if name == "" {
+		return serialwin.Config{}, fmt.Errorf("请选择串口")
+	}
 	baud, err := strconv.Atoi(strings.TrimSpace(a.baudCB.Text()))
 	if err != nil || baud <= 0 {
 		return serialwin.Config{}, fmt.Errorf("波特率无效")
@@ -300,7 +304,7 @@ func (a *app) serialConfig() (serialwin.Config, error) {
 	if data < 5 || data > 8 {
 		return serialwin.Config{}, fmt.Errorf("数据位无效")
 	}
-	return serialwin.Config{Name: strings.ToUpper(strings.TrimSpace(a.portCB.Text())), BaudRate: uint32(baud), DataBits: byte(data), Parity: byte(a.parityCB.CurrentIndex()), StopBits: byte(a.stopCB.CurrentIndex()), Flow: byte(a.flowCB.CurrentIndex()), DTR: a.dtrCB.Checked(), RTS: a.rtsCB.Checked()}, nil
+	return serialwin.Config{Name: name, BaudRate: uint32(baud), DataBits: byte(data), Parity: byte(a.parityCB.CurrentIndex()), StopBits: byte(a.stopCB.CurrentIndex()), Flow: byte(a.flowCB.CurrentIndex()), DTR: a.dtrCB.Checked(), RTS: a.rtsCB.Checked()}, nil
 }
 
 func (a *app) togglePort() {
@@ -823,16 +827,20 @@ func (a *app) stopCycle() {
 }
 
 func (a *app) refreshPorts() {
-	current := ""
-	if a.portCB != nil {
-		current = a.portCB.Text()
+	if a.portCB == nil {
+		return
 	}
+	current := a.portCB.Text()
 	ports := serialwin.ListPorts()
 	a.portCB.SetModel(ports)
-	if current != "" {
-		a.portCB.SetText(current)
-	} else if len(ports) > 0 {
-		a.portCB.SetCurrentIndex(0)
+
+	selected, index := resolvePortSelection(current, ports)
+	if index >= 0 {
+		a.portCB.SetCurrentIndex(index)
+		a.portCB.SetText(selected)
+	} else {
+		a.portCB.SetCurrentIndex(-1)
+		a.portCB.SetText("")
 	}
 }
 
@@ -844,6 +852,9 @@ func (a *app) connectionTypeChanged() {
 	a.tcpBasic.SetVisible(a.isTCP())
 	a.tcpServerBasic.SetVisible(a.isTCPServer())
 	a.udpBasic.SetVisible(a.isUDP())
+	if !a.isNetwork() {
+		a.refreshPorts()
+	}
 	a.modeSettingsGB.Layout().Update(true)
 	a.settingsPanel.Layout().Update(true)
 	a.updateControls()
@@ -1199,7 +1210,7 @@ func (a *app) loadSettings() {
 		}
 	}
 	setIndex(a.connectionTypeCB, connectionType)
-	a.portCB.SetText(config.Load("Port", "COM1"))
+	a.portCB.SetText(config.Load("Port", ""))
 	a.tcpHostLE.SetText(config.Load("TCPHost", "127.0.0.1"))
 	a.tcpPortLE.SetText(config.Load("TCPPort", "8080"))
 	a.tcpLocalHostLE.SetText(config.Load("TCPLocalHost", "0.0.0.0"))
@@ -1237,7 +1248,9 @@ func (a *app) loadSettings() {
 func (a *app) saveSettings() {
 	config.SaveInt("ConnectionType", a.connectionTypeCB.CurrentIndex())
 	config.SaveInt("ConnectionTypeOrder", 1)
-	config.Save("Port", a.portCB.Text())
+	if port := strings.TrimSpace(a.portCB.Text()); port != "" {
+		config.Save("Port", port)
+	}
 	config.Save("TCPHost", a.tcpHostLE.Text())
 	config.Save("TCPPort", a.tcpPortLE.Text())
 	config.Save("TCPLocalHost", a.tcpLocalHostLE.Text())

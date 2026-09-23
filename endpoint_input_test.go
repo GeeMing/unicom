@@ -60,3 +60,66 @@ func TestNormalizeEndpointInput(t *testing.T) {
 		})
 	}
 }
+
+func TestResolvePortSelection(t *testing.T) {
+	tests := []struct {
+		name          string
+		current       string
+		ports         []string
+		wantSelected  string
+		wantIndex     int
+	}{
+		{
+			name:         "remembered port exists exactly",
+			current:      "COM3",
+			ports:        []string{"COM1", "COM3", "COM5"},
+			wantSelected: "COM3",
+			wantIndex:    1,
+		},
+		{
+			name:         "remembered port exists case-insensitively with whitespace",
+			current:      " com3 ",
+			ports:        []string{"COM1", "COM3", "COM5"},
+			wantSelected: "COM3",
+			wantIndex:    1,
+		},
+		{
+			name:         "remembered port does not exist, existing ports available",
+			current:      "COM8",
+			ports:        []string{"COM2", "COM4"},
+			wantSelected: "COM2",
+			wantIndex:    0,
+		},
+		{
+			name:         "remembered port does not exist, no ports available",
+			current:      "COM8",
+			ports:        []string{},
+			wantSelected: "",
+			wantIndex:    -1,
+		},
+		{
+			name:         "empty current, ports available",
+			current:      "",
+			ports:        []string{"COM6"},
+			wantSelected: "COM6",
+			wantIndex:    0,
+		},
+		{
+			name:         "empty current, no ports available",
+			current:      "",
+			ports:        []string{},
+			wantSelected: "",
+			wantIndex:    -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selected, index := resolvePortSelection(tt.current, tt.ports)
+			if selected != tt.wantSelected || index != tt.wantIndex {
+				t.Fatalf("resolvePortSelection(%q, %v) = (%q, %d), want (%q, %d)",
+					tt.current, tt.ports, selected, index, tt.wantSelected, tt.wantIndex)
+			}
+		})
+	}
+}

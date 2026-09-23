@@ -94,3 +94,23 @@ func normalizeIPInput(input string) string {
 		return r
 	}, input)
 }
+
+// resolvePortSelection determines which serial port to select given the currently
+// remembered (or active) port name and the list of available ports.
+// If the remembered port exists in ports (case-insensitive), it is retained.
+// If it does not exist, the first available port in ports is selected.
+// If no ports are available, it returns ("", -1) to clear the selection.
+func resolvePortSelection(current string, ports []string) (string, int) {
+	current = strings.TrimSpace(current)
+	if current != "" {
+		for i, p := range ports {
+			if strings.EqualFold(p, current) {
+				return p, i
+			}
+		}
+	}
+	if len(ports) > 0 {
+		return ports[0], 0
+	}
+	return "", -1
+}
