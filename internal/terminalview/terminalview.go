@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package terminalview
@@ -6,16 +7,14 @@ import (
 	"io"
 	"strings"
 	"unicode/utf16"
+	"unsafe"
 
 	"github.com/hinshun/vt10x"
 	"github.com/lxn/walk"
 	"github.com/lxn/win"
 )
 
-const (
-	cellWidth  = 9
-	cellHeight = 18
-)
+const selectionScrollTimer = 1
 
 type terminalIO struct{ write func([]byte) error }
 
@@ -35,21 +34,34 @@ type TerminalView struct {
 	*walk.CustomWidget
 	state         *vt10x.State
 	vt            *vt10x.VT
-	font          *walk.Font
+	font          gridFont
 	brushes       map[walk.Color]*walk.SolidColorBrush
 	sendBytes     func([]byte) error
 	sendText      func(string) error
 	highSurrogate uint16
+	// scrollOffset is the number of lines between the displayed viewport and
+	// the live bottom. Zero means that new output is followed automatically.
+	scrollOffset int
+	selecting    bool
+	selectionSet bool
+	selectAnchor cellPosition
+	selectFocus  cellPosition
+	snapshot     *screenSnapshot
+	dragMouse    uintptr
+	dragScroll   int
+	dragMoved    bool
+	suppressChar uint16
+}
+
+// cellPosition addresses a cell in the combined scrollback + live screen.
+type cellPosition struct {
+	row int
+	col int
 }
 
 func New(parent walk.Container, sendBytes func([]byte) error, sendText func(string) error) (*TerminalView, error) {
 	tv := &TerminalView{brushes: make(map[walk.Color]*walk.SolidColorBrush), sendBytes: sendBytes, sendText: sendText}
-	font, err := walk.NewFont("Consolas", 11, 0)
-	if err != nil {
-		return nil, err
-	}
-	tv.font = font
-	cw, err := walk.NewCustomWidget(parent, win.WS_TABSTOP, func(canvas *walk.Canvas, update walk.Rectangle) error { return tv.paint(canvas, update) })
+	cw, err := walk.NewCustomWidget(parent, win.WS_TABSTOP|win.WS_VSCROLL, func(canvas *walk.Canvas, update walk.Rectangle) error { return tv.paint(canvas, update) })
 	if err != nil {
 		return nil, err
 	}
@@ -78,8 +90,13 @@ func (tv *TerminalView) Reset() error {
 	if err != nil {
 		return err
 	}
+	tv.stopSelectionDrag()
+	tv.snapshot = nil
 	tv.state, tv.vt = state, term
+	tv.scrollOffset = 0
+	tv.selecting, tv.selectionSet = false, false
 	tv.resizeTerminal()
+	tv.updateScrollBar()
 	return tv.Invalidate()
 }
 
@@ -87,8 +104,19 @@ func (tv *TerminalView) Feed(p []byte) error {
 	if len(p) == 0 {
 		return nil
 	}
+	oldHistory, oldDropped := tv.liveHistory()
 	_, err := tv.vt.Write(p)
-	tv.Invalidate()
+	if tv.snapshot == nil {
+		newHistory, newDropped := tv.liveHistory()
+		if tv.scrollOffset > 0 {
+			tv.scrollOffset += newHistory - oldHistory + int(newDropped-oldDropped)
+		}
+		tv.clampScrollOffset(newHistory)
+		tv.updateScrollBar()
+		if tv.CustomWidget != nil {
+			tv.Invalidate()
+		}
+	}
 	return err
 }
 
@@ -103,19 +131,160 @@ func (tv *TerminalView) resizeTerminal() {
 	if tv.vt == nil || tv.Handle() == 0 {
 		return
 	}
+	hdc := win.GetDC(tv.Handle())
+	if hdc == 0 {
+		return
+	}
+	err := tv.font.ensure(hdc, int(win.GetDeviceCaps(hdc, win.LOGPIXELSY)))
+	win.ReleaseDC(tv.Handle(), hdc)
+	if err != nil {
+		return
+	}
 	b := tv.ClientBounds()
-	cols, rows := b.Width/cellWidth, b.Height/cellHeight
-	if cols < 10 {
-		cols = 10
+	cols, rows := maxInt(10, b.Width/tv.font.width), maxInt(4, b.Height/tv.font.height)
+	tv.state.Lock()
+	oldRows, oldCols := tv.state.Size()
+	tv.state.Unlock()
+	if cols != oldCols || rows != oldRows {
+		// A real geometry change invalidates cell-based selection coordinates.
+		tv.stopSelectionDrag()
+		tv.snapshot, tv.selectionSet = nil, false
+		tv.vt.Resize(cols, rows)
 	}
-	if rows < 4 {
-		rows = 4
+	tv.clampScrollOffset(tv.historySize())
+	tv.updateScrollBar()
+}
+
+func (tv *TerminalView) historySize() int {
+	_, _, history := tv.viewSize()
+	return history
+}
+
+func (tv *TerminalView) liveHistory() (int, int64) {
+	tv.state.Lock()
+	defer tv.state.Unlock()
+	return tv.state.ScrollbackSize(), tv.state.ScrollbackDropped()
+}
+
+func (tv *TerminalView) clampScrollOffset(history int) {
+	if tv.scrollOffset < 0 {
+		tv.scrollOffset = 0
 	}
-	tv.vt.Resize(cols, rows)
+	if tv.scrollOffset > history {
+		tv.scrollOffset = history
+	}
+}
+
+func (tv *TerminalView) updateScrollBar() {
+	if tv.CustomWidget == nil || tv.Handle() == 0 {
+		return
+	}
+	rows, _, history := tv.viewSize()
+	tv.clampScrollOffset(history)
+	info := win.SCROLLINFO{
+		CbSize: uint32(unsafe.Sizeof(win.SCROLLINFO{})),
+		FMask:  win.SIF_RANGE | win.SIF_PAGE | win.SIF_POS | win.SIF_DISABLENOSCROLL,
+		NMin:   0,
+		NMax:   int32(history + rows - 1),
+		NPage:  uint32(rows),
+		NPos:   int32(history - tv.scrollOffset),
+	}
+	win.SetScrollInfo(tv.Handle(), win.SB_VERT, &info, true)
+}
+
+func (tv *TerminalView) setScrollOffset(offset int) {
+	history := tv.historySize()
+	tv.scrollOffset = offset
+	tv.clampScrollOffset(history)
+	tv.updateScrollBar()
+	tv.Invalidate()
+}
+
+func (tv *TerminalView) scrollBy(lines int) {
+	tv.setScrollOffset(tv.scrollOffset + lines)
+}
+
+func orderedSelection(a, b cellPosition) (cellPosition, cellPosition) {
+	if a.row > b.row || (a.row == b.row && a.col > b.col) {
+		return b, a
+	}
+	return a, b
+}
+
+func (tv *TerminalView) cellSelected(row, col int) bool {
+	if !tv.selectionSet {
+		return false
+	}
+	start, end := orderedSelection(tv.selectAnchor, tv.selectFocus)
+	p := cellPosition{row: row, col: col}
+	return (p.row > start.row || (p.row == start.row && p.col >= start.col)) &&
+		(p.row < end.row || (p.row == end.row && p.col <= end.col))
+}
+
+func (tv *TerminalView) positionFromMouse(lParam uintptr) cellPosition {
+	x := int(int16(uint16(lParam & 0xffff)))
+	y := int(int16(uint16((lParam >> 16) & 0xffff)))
+	rows, cols, history := tv.viewSize()
+	col := x / maxInt(1, tv.font.width)
+	row := y / maxInt(1, tv.font.height)
+	if x < 0 {
+		col = 0
+	}
+	if y < 0 {
+		row = 0
+	}
+	col = clampInt(col, 0, cols-1)
+	row = clampInt(row, 0, rows-1)
+	viewStart := history - tv.scrollOffset
+	return cellPosition{row: clampInt(viewStart+row, 0, history+rows-1), col: col}
+}
+
+func (tv *TerminalView) selectedText() string {
+	if tv.snapshot == nil || !tv.selectionSet {
+		return ""
+	}
+	start, end := orderedSelection(tv.selectAnchor, tv.selectFocus)
+	rows, cols, history := tv.viewSize()
+	maxRow := history + rows - 1
+	start.row = clampInt(start.row, 0, maxRow)
+	end.row = clampInt(end.row, 0, maxRow)
+	var result strings.Builder
+	for row := start.row; row <= end.row; row++ {
+		from, to := 0, cols-1
+		if row == start.row {
+			from = clampInt(start.col, 0, cols-1)
+		}
+		if row == end.row {
+			to = clampInt(end.col, 0, cols-1)
+		}
+		// Include the lead glyph when a drag starts on its continuation cell.
+		if from > 0 && tv.viewCell(from, row).ch == 0 {
+			from--
+		}
+		line := make([]rune, 0, to-from+1)
+		for col := from; col <= to; col++ {
+			ch := tv.viewCell(col, row).ch
+			if ch != 0 {
+				line = append(line, ch)
+			}
+		}
+		result.WriteString(strings.TrimRight(string(line), " \x00"))
+		if row != end.row {
+			result.WriteString("\r\n")
+		}
+	}
+	return result.String()
+}
+
+func (tv *TerminalView) copySelection() bool {
+	text := tv.selectedText()
+	if text == "" {
+		return false
+	}
+	return walk.Clipboard().SetText(text) == nil
 }
 
 func (tv *TerminalView) paint(canvas *walk.Canvas, update walk.Rectangle) error {
-	tv.resizeTerminal()
 	bounds := tv.ClientBounds()
 	bg, err := tv.brush(walk.RGB(12, 14, 16))
 	if err != nil {
@@ -124,57 +293,80 @@ func (tv *TerminalView) paint(canvas *walk.Canvas, update walk.Rectangle) error 
 	if err = canvas.FillRectangle(bg, bounds); err != nil {
 		return err
 	}
-	if tv.state == nil {
+	if tv.state == nil || tv.font.handle == 0 {
 		return nil
 	}
-
+	rows, cols, history := tv.viewSize()
 	tv.state.Lock()
 	defer tv.state.Unlock()
-	rows, cols := tv.state.Size()
+	hdc := canvas.HDC()
+	oldFont := win.SelectObject(hdc, win.HGDIOBJ(tv.font.handle))
+	defer win.SelectObject(hdc, oldFont)
+	oldMode := win.SetBkMode(hdc, win.TRANSPARENT)
+	defer win.SetBkMode(hdc, oldMode)
+	oldColor := win.SetTextColor(hdc, 0)
+	defer win.SetTextColor(hdc, oldColor)
+	tv.clampScrollOffset(history)
+	viewStart := history - tv.scrollOffset
+	cw, ch := tv.font.width, tv.font.height
+	text := make([]uint16, 0, cols*2)
+	advances := make([]int32, 0, cols*2)
 	for y := 0; y < rows; y++ {
+		row := viewStart + y
 		for x := 0; x < cols; {
-			ch, fg, cellBG := tv.state.Cell(x, y)
 			start := x
-			chars := make([]rune, 0, 16)
+			fg, cellBG := tv.cellColors(row, x, cols)
+			text, advances = text[:0], advances[:0]
 			for x < cols {
-				c, f, b := tv.state.Cell(x, y)
+				f, b := tv.cellColors(row, x, cols)
 				if f != fg || b != cellBG {
 					break
+				}
+				c := tv.viewCell(x, row).ch
+				width := 1
+				if c != 0 && x+1 < cols && tv.viewCell(x+1, row).ch == 0 {
+					width = 2
 				}
 				if c == 0 {
 					c = ' '
 				}
-				chars = append(chars, c)
-				x++
+				text, advances = appendGlyph(text, advances, c, width*cw)
+				x += width
 			}
-			fgColor := colorFor(fg, false)
-			bgColor := colorFor(cellBG, true)
-			if bgColor != walk.RGB(12, 14, 16) {
-				brush, e := tv.brush(bgColor)
-				if e != nil {
-					return e
-				}
-				if e = canvas.FillRectangle(brush, walk.Rectangle{X: start * cellWidth, Y: y * cellHeight, Width: (x - start) * cellWidth, Height: cellHeight}); e != nil {
-					return e
-				}
+			brush, e := tv.brush(cellBG)
+			if e != nil {
+				return e
 			}
-			if ch != 0 && strings.TrimSpace(string(chars)) != "" {
-				e := canvas.DrawText(string(chars), tv.font, fgColor, walk.Rectangle{X: start * cellWidth, Y: y * cellHeight, Width: (x-start)*cellWidth + cellWidth, Height: cellHeight + 2}, walk.TextLeft|walk.TextTop|walk.TextSingleLine|walk.TextNoPrefix|walk.TextNoClip)
-				if e != nil {
-					return e
-				}
+			if e = canvas.FillRectangle(brush, walk.Rectangle{X: start * cw, Y: y * ch, Width: (x - start) * cw, Height: ch}); e != nil {
+				return e
+			}
+			win.SetTextColor(hdc, win.COLORREF(fg))
+			if e = drawGridRun(hdc, start*cw, y*ch, (x-start)*cw, ch, text, advances); e != nil {
+				return e
 			}
 		}
 	}
-	if tv.state.CursorVisible() && tv.Focused() {
+	if tv.snapshot == nil && tv.scrollOffset == 0 && tv.state.CursorVisible() && tv.Focused() {
 		x, y := tv.state.Cursor()
 		brush, e := tv.brush(walk.RGB(230, 233, 236))
 		if e != nil {
 			return e
 		}
-		return canvas.FillRectangle(brush, walk.Rectangle{X: x * cellWidth, Y: y*cellHeight + cellHeight - 2, Width: cellWidth, Height: 2})
+		return canvas.FillRectangle(brush, walk.Rectangle{X: x * cw, Y: y*ch + ch - 2, Width: cw, Height: 2})
 	}
 	return nil
+}
+
+func (tv *TerminalView) cellColors(row, col, cols int) (walk.Color, walk.Color) {
+	c := tv.viewCell(col, row)
+	selected := tv.cellSelected(row, col)
+	if col+1 < cols && tv.viewCell(col+1, row).ch == 0 {
+		selected = selected || tv.cellSelected(row, col+1)
+	}
+	if selected {
+		return walk.RGB(255, 255, 255), walk.RGB(38, 92, 150)
+	}
+	return colorFor(c.fg, false), colorFor(c.bg, true)
 }
 
 func (tv *TerminalView) brush(color walk.Color) (*walk.SolidColorBrush, error) {
@@ -190,6 +382,9 @@ func (tv *TerminalView) brush(color walk.Color) (*walk.SolidColorBrush, error) {
 }
 
 func (tv *TerminalView) disposeResources() {
+	tv.stopSelectionDrag()
+	tv.font.dispose()
+	tv.snapshot = nil
 	for color, brush := range tv.brushes {
 		brush.Dispose()
 		delete(tv.brushes, color)
@@ -246,6 +441,7 @@ func (tv *TerminalView) sendSpecial(key uintptr) bool {
 	default:
 		return false
 	}
+	tv.resumeLive()
 	if tv.sendBytes != nil {
 		_ = tv.sendBytes([]byte(seq))
 	}
@@ -270,6 +466,7 @@ func (tv *TerminalView) paste() bool {
 	if err != nil || text == "" {
 		return false
 	}
+	tv.resumeLive()
 	if tv.sendText != nil {
 		_ = tv.sendText(text)
 	}
@@ -300,20 +497,153 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 		return win.DLGC_WANTALLKEYS | win.DLGC_WANTARROWS | win.DLGC_WANTCHARS | win.DLGC_WANTTAB
 	case win.WM_LBUTTONDOWN:
 		tv.SetFocus()
+		tv.captureSelection()
+		tv.selectAnchor = tv.positionFromMouse(lParam)
+		tv.selectFocus = tv.selectAnchor
+		tv.dragMouse = lParam
+		tv.dragMoved = false
+		tv.selecting, tv.selectionSet = true, true
+		win.SetCapture(hwnd)
 		tv.Invalidate()
+		return 0
+	case win.WM_MOUSEMOVE:
+		if tv.selecting && wParam&win.MK_LBUTTON != 0 {
+			tv.dragMoved = tv.dragMoved || tv.dragMouse != lParam
+			tv.dragMouse = lParam
+			y := int(int16(uint16(lParam >> 16)))
+			direction := 0
+			if y < 0 {
+				direction = 1
+			} else if y >= tv.ClientBounds().Height {
+				direction = -1
+			}
+			if direction != tv.dragScroll {
+				tv.dragScroll = direction
+				if direction == 0 {
+					win.KillTimer(hwnd, selectionScrollTimer)
+				} else {
+					win.SetTimer(hwnd, selectionScrollTimer, 50, 0)
+				}
+			}
+			if focus := tv.positionFromMouse(lParam); focus != tv.selectFocus {
+				tv.selectFocus = focus
+				tv.Invalidate()
+			}
+		}
+		return 0
+	case win.WM_TIMER:
+		if wParam == selectionScrollTimer {
+			if tv.selecting && tv.dragScroll != 0 {
+				tv.scrollBy(tv.dragScroll)
+				tv.selectFocus = tv.positionFromMouse(tv.dragMouse)
+			}
+			return 0
+		}
+	case win.WM_LBUTTONUP:
+		if tv.selecting {
+			tv.selectFocus = tv.positionFromMouse(lParam)
+			tv.stopSelectionDrag()
+			if !tv.dragMoved && tv.selectAnchor == tv.selectFocus {
+				tv.resumeLive()
+			}
+			tv.Invalidate()
+		}
+		return 0
+	case win.WM_CAPTURECHANGED, win.WM_CANCELMODE:
+		tv.stopSelectionDrag()
 	case win.WM_RBUTTONUP:
+		if tv.selectionSet && tv.copySelection() {
+			return 0
+		}
 		tv.paste()
 		return 0
 	case win.WM_SETFOCUS, win.WM_KILLFOCUS:
 		tv.Invalidate()
 	case win.WM_SIZE:
 		tv.resizeTerminal()
+	case win.WM_MOUSEWHEEL:
+		delta := int16(uint16(wParam >> 16))
+		if delta != 0 {
+			lines := int(delta) / 120 * 3
+			if lines == 0 {
+				if delta > 0 {
+					lines = 1
+				} else {
+					lines = -1
+				}
+			}
+			tv.scrollBy(lines)
+		}
+		return 0
+	case win.WM_VSCROLL:
+		command := uint16(wParam & 0xffff)
+		rows, _, _ := tv.viewSize()
+		switch command {
+		case win.SB_LINEUP:
+			tv.scrollBy(1)
+		case win.SB_LINEDOWN:
+			tv.scrollBy(-1)
+		case win.SB_PAGEUP:
+			tv.scrollBy(maxInt(1, rows-1))
+		case win.SB_PAGEDOWN:
+			tv.scrollBy(-maxInt(1, rows-1))
+		case win.SB_TOP:
+			tv.setScrollOffset(tv.historySize())
+		case win.SB_BOTTOM:
+			tv.setScrollOffset(0)
+		case win.SB_THUMBPOSITION, win.SB_THUMBTRACK:
+			info := win.SCROLLINFO{CbSize: uint32(unsafe.Sizeof(win.SCROLLINFO{})), FMask: win.SIF_TRACKPOS}
+			if win.GetScrollInfo(tv.Handle(), win.SB_VERT, &info) {
+				tv.setScrollOffset(tv.historySize() - int(info.NTrackPos))
+			}
+		}
+		return 0
 	case win.WM_CHAR:
+		if tv.suppressChar != 0 {
+			unit := tv.suppressChar
+			tv.suppressChar = 0
+			if uint16(wParam) == unit {
+				return 0
+			}
+		}
+		if wParam == 27 && tv.snapshot != nil {
+			tv.resumeLive()
+			return 0
+		}
+		// In terminal mode Ctrl+C normally sends ETX.  When text is selected it
+		// follows the standard Windows convention and copies instead.
+		if wParam == 3 && tv.selectionSet {
+			tv.copySelection()
+			return 0
+		}
+		tv.resumeLive()
 		tv.sendUTF16Unit(uint16(wParam))
 		return 0
 	case win.WM_KEYDOWN:
+		tv.suppressChar = 0
+		if (wParam == uintptr(walk.KeyC) && walk.ControlDown() && walk.ShiftDown()) ||
+			(wParam == win.VK_INSERT && walk.ControlDown()) {
+			if tv.copySelection() {
+				if wParam == uintptr(walk.KeyC) {
+					tv.suppressChar = 3
+				}
+				return 0
+			}
+		}
+		if walk.ShiftDown() && (wParam == win.VK_PRIOR || wParam == win.VK_NEXT) {
+			rows, _, _ := tv.viewSize()
+			lines := maxInt(1, rows-1)
+			if wParam == win.VK_NEXT {
+				lines = -lines
+			}
+			tv.scrollBy(lines)
+			return 0
+		}
 		if (wParam == win.VK_INSERT && walk.ShiftDown()) || (wParam == uintptr(walk.KeyV) && walk.ControlDown() && walk.ShiftDown()) {
 			tv.paste()
+			if wParam == uintptr(walk.KeyV) {
+				tv.suppressChar = 22
+			}
 			return 0
 		}
 		if tv.sendSpecial(wParam) {
@@ -321,6 +651,47 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 		}
 	}
 	return tv.CustomWidget.WndProc(hwnd, msg, wParam, lParam)
+}
+
+func (tv *TerminalView) stopSelectionDrag() {
+	tv.selecting, tv.dragScroll = false, 0
+	if tv.CustomWidget != nil && tv.Handle() != 0 {
+		win.KillTimer(tv.Handle(), selectionScrollTimer)
+		captured, _, _ := getCapture.Call()
+		if win.HWND(captured) == tv.Handle() {
+			win.ReleaseCapture()
+		}
+	}
+}
+
+func (tv *TerminalView) resumeLive() {
+	if tv.snapshot == nil && tv.scrollOffset == 0 {
+		return
+	}
+	tv.stopSelectionDrag()
+	tv.snapshot, tv.selectionSet = nil, false
+	tv.scrollOffset = 0
+	tv.updateScrollBar()
+	if tv.CustomWidget != nil {
+		tv.Invalidate()
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 var ansiColors = [16]walk.Color{

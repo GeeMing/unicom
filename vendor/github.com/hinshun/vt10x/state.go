@@ -83,24 +83,31 @@ type parseState func(c rune)
 type State struct {
 	DebugLogger *log.Logger
 
-	w             io.Writer
-	mu            sync.Mutex
-	changed       ChangeFlag
-	cols, rows    int
-	lines         []line
-	altLines      []line
-	dirty         []bool // line dirtiness
-	anydirty      bool
-	cur, curSaved cursor
-	top, bottom   int // scroll limits
-	mode          ModeFlag
-	state         parseState
-	str           strEscape
-	csi           csiEscape
-	numlock       bool
-	tabs          []bool
-	title         string
+	w              io.Writer
+	mu             sync.Mutex
+	changed        ChangeFlag
+	cols, rows     int
+	lines          []line
+	altLines       []line
+	dirty          []bool // line dirtiness
+	anydirty       bool
+	cur, curSaved  cursor
+	top, bottom    int // scroll limits
+	mode           ModeFlag
+	state          parseState
+	str            strEscape
+	csi            csiEscape
+	numlock        bool
+	tabs           []bool
+	title          string
+	history        []line
+	historyDropped int64
 }
+
+// MaxScrollbackLines is the maximum number of lines retained above the
+// visible screen.  It is deliberately bounded: terminals often run for days
+// and an unbounded history would eventually consume all available memory.
+const MaxScrollbackLines = 10000
 
 func (t *State) logf(format string, args ...interface{}) {
 	if t.DebugLogger != nil {
@@ -268,6 +275,8 @@ func (t *State) defaultCursor() cursor {
 }
 
 func (t *State) reset() {
+	t.history = nil
+	t.historyDropped = 0
 	t.cur = t.defaultCursor()
 	t.saveCursor()
 	for i := range t.tabs {
@@ -459,6 +468,22 @@ func (t *State) scrollDown(orig, n int) {
 
 func (t *State) scrollUp(orig, n int) {
 	n = clamp(n, 0, t.bottom-orig+1)
+	// Only a scroll of the whole primary screen contributes to scrollback.
+	// Scrolling a DECSTBM region (and the alternate screen used by full-screen
+	// applications) is an in-place screen operation and must not leak into the
+	// user's terminal history.
+	if orig == 0 && t.bottom == t.rows-1 && t.mode&ModeAltScreen == 0 && n > 0 {
+		for i := 0; i < n; i++ {
+			row := make(line, len(t.lines[i]))
+			copy(row, t.lines[i])
+			t.history = append(t.history, row)
+		}
+		if extra := len(t.history) - MaxScrollbackLines; extra > 0 {
+			t.historyDropped += int64(extra)
+			copy(t.history, t.history[extra:])
+			t.history = t.history[:MaxScrollbackLines]
+		}
+	}
 	t.clear(0, orig, t.cols-1, orig+n-1)
 	t.changed |= ChangedScreen
 	for i := orig; i <= t.bottom-n; i++ {
@@ -710,6 +735,30 @@ func (t *State) setTitle(title string) {
 
 func (t *State) Size() (rows int, cols int) {
 	return t.rows, t.cols
+}
+
+// ScrollbackSize returns the number of retained lines.  Like Cell and Size,
+// callers that access this together with other state should hold State.Lock.
+func (t *State) ScrollbackSize() int {
+	return len(t.history)
+}
+
+// ScrollbackDropped counts evicted history rows since reset. Together with
+// ScrollbackSize this lets views track scrolling even at the history limit.
+// Callers must hold State.Lock when accessing a running terminal.
+func (t *State) ScrollbackDropped() int64 {
+	return t.historyDropped
+}
+
+// ScrollbackCell returns a cell from the retained history.  Historical lines
+// may have a different width after a terminal resize, so missing cells are
+// returned as blank cells with default colours.
+func (t *State) ScrollbackCell(x, y int) (ch rune, fg Color, bg Color) {
+	if y < 0 || y >= len(t.history) || x < 0 || x >= len(t.history[y]) {
+		return ' ', DefaultFG, DefaultBG
+	}
+	g := t.history[y][x]
+	return g.c, Color(g.fg), Color(g.bg)
 }
 
 func (t *State) String() string {
