@@ -69,6 +69,8 @@ type app struct {
 	modeSettingsGB                                                     *walk.GroupBox
 	mainSplitter, contentSplitter                                      *walk.Splitter
 	terminal                                                           *terminalview.TerminalView
+	terminalStatus                                                     *walk.Label
+	terminalLatestBtn                                                  *walk.PushButton
 	deviceWatcher                                                      *devicewatch.Watcher
 
 	manager             *connection.Manager
@@ -80,6 +82,9 @@ type app struct {
 	txBytes             uint64
 	lastShownRX         uint64
 	lastRender          time.Time
+	renderQueued        bool
+	terminalActive      bool
+	lastCounterText     string
 	pending             []byte
 	renderEncoding      string
 	termLastRX          uint64
@@ -272,7 +277,14 @@ func (a *app) createUI(windowIcon *walk.Icon) error {
 					}},
 					Composite{AssignTo: &a.terminalPanel, Visible: false, Layout: VBox{MarginsZero: true, Spacing: 6}, Children: []Widget{
 						Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-							HSpacer{}, PushButton{Text: "退出终端模式", MinSize: Size{Width: 112}, OnClicked: func() { a.termModeCB.SetChecked(false) }},
+							Label{AssignTo: &a.terminalStatus, Text: "实时显示", StretchFactor: 1},
+							PushButton{AssignTo: &a.terminalLatestBtn, Text: "回到最新", Enabled: false, ToolTipText: "退出选择或历史浏览，恢复实时显示（Esc）", OnClicked: func() {
+								if a.terminal != nil {
+									a.terminal.ResumeLive()
+									a.terminal.SetFocus()
+								}
+							}},
+							PushButton{Text: "退出终端模式", MinSize: Size{Width: 112}, OnClicked: func() { a.termModeCB.SetChecked(false) }},
 						}},
 						Composite{AssignTo: &a.terminalHost, StretchFactor: 1, Layout: VBox{MarginsZero: true}},
 					}},
@@ -288,7 +300,26 @@ func (a *app) createTerminal() error {
 		return err
 	}
 	a.terminal = view
+	view.ViewChanged().Attach(a.updateTerminalStatus)
+	a.updateTerminalStatus()
 	return nil
+}
+
+func (a *app) updateTerminalStatus() {
+	if a.terminal == nil || a.terminalStatus == nil {
+		return
+	}
+	frozen, offset := a.terminal.ViewStatus()
+	text := "实时显示"
+	if frozen {
+		text = "选择已冻结（后台继续接收）"
+	} else if offset > 0 {
+		text = fmt.Sprintf("查看历史，距最新 %d 行（后台继续接收）", offset)
+	}
+	if a.terminalStatus.Text() != text {
+		a.terminalStatus.SetText(text)
+	}
+	a.terminalLatestBtn.SetEnabled(frozen || offset > 0)
 }
 
 func (a *app) serialConfig() (serialwin.Config, error) {
@@ -532,13 +563,32 @@ func (a *app) onData(event connection.DataEvent) {
 func (a *app) onTX(n int) { a.mu.Lock(); a.txBytes += uint64(n); a.mu.Unlock() }
 func (a *app) scheduleRender() {
 	a.mu.Lock()
-	if time.Since(a.lastRender) < 60*time.Millisecond {
+	interval := 60 * time.Millisecond
+	if a.terminalActive {
+		interval = 30 * time.Millisecond
+	}
+	if a.renderQueued || time.Since(a.lastRender) < interval {
 		a.mu.Unlock()
 		return
 	}
 	a.lastRender = time.Now()
+	a.renderQueued = true
 	a.mu.Unlock()
-	a.mw.Synchronize(a.renderPending)
+	a.mw.Synchronize(func() {
+		defer func() {
+			a.mu.Lock()
+			a.renderQueued = false
+			a.mu.Unlock()
+		}()
+		// Read the latest total on the UI thread, so queued work includes all
+		// data received in the meantime and cannot restore an older counter.
+		rx := a.buffer.Received()
+		if rx != a.lastShownRX {
+			a.renderPending()
+		} else {
+			a.updateCounters(rx)
+		}
+	})
 }
 
 func (a *app) captureReceiveScroll() receiveScrollState {
@@ -1085,6 +1135,9 @@ func (a *app) termModeChanged() {
 		return
 	}
 	term := a.termModeCB.Checked()
+	a.mu.Lock()
+	a.terminalActive = term
+	a.mu.Unlock()
 	a.contentSplitter.SetVisible(!term)
 	a.terminalPanel.SetVisible(term)
 	a.rightPanel.Layout().Update(true)
@@ -1169,23 +1222,22 @@ func (a *app) updateCounters(rx uint64) {
 	a.mu.Lock()
 	tx := a.txBytes
 	a.mu.Unlock()
-	a.countersItem.SetText(fmt.Sprintf("RX %d B   TX %d B", rx, tx))
+	text := fmt.Sprintf("RX %d B   TX %d B", rx, tx)
+	if text != a.lastCounterText {
+		a.countersItem.SetText(text)
+		a.lastCounterText = text
+	}
 }
 func (a *app) periodicUI() {
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(30 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
 		if a.mw == nil || a.mw.Handle() == 0 {
 			return
 		}
-		rx := a.buffer.Received()
-		a.mw.Synchronize(func() {
-			if rx != a.lastShownRX {
-				a.renderPending()
-			} else {
-				a.updateCounters(rx)
-			}
-		})
+		// Flush trailing data even when no further receive event arrives.
+		// scheduleRender keeps at most one UI callback pending under load.
+		a.scheduleRender()
 	}
 }
 func (a *app) selectedEncoding() string {

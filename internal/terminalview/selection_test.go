@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hinshun/vt10x"
+	"github.com/lxn/win"
 )
 
 func newTestView(t *testing.T, cols, rows int) *TerminalView {
@@ -105,5 +106,82 @@ func TestSelectionFreezesHistoryWhileDraggingUp(t *testing.T) {
 	tv.scrollOffset = tv.historySize()
 	if got := tv.positionFromMouse(0); got != (cellPosition{0, 0}) {
 		t.Fatalf("top of snapshot = %v", got)
+	}
+}
+
+func TestScrollingToBottomResumesFrozenOutput(t *testing.T) {
+	for _, offset := range []int{0, 2} {
+		tv := newTestView(t, 12, 4)
+		feedTestView(t, tv, strings.Repeat("old\r\n", 8))
+		tv.setScrollOffset(offset)
+		tv.selectAll()
+		feedTestView(t, tv, "LATEST")
+		if frozen, _ := tv.ViewStatus(); !frozen {
+			t.Fatal("selection was not frozen")
+		}
+		notified := false
+		tv.ViewChanged().Attach(func() {
+			frozen, offset := tv.ViewStatus()
+			notified = !frozen && offset == 0
+		})
+		tv.WndProc(0, win.WM_VSCROLL, win.SB_BOTTOM, 0)
+		if !notified || tv.selectionSet || tv.snapshot != nil {
+			t.Fatal("scrollbar bottom did not resume and notify the view")
+		}
+		if !strings.Contains(tv.Text(), "LATEST") {
+			t.Fatal("background output was lost")
+		}
+	}
+}
+
+func TestDragAtBottomKeepsSnapshotUntilFinished(t *testing.T) {
+	tv := newTestView(t, 12, 4)
+	feedTestView(t, tv, "original")
+	tv.selectAll()
+	want := tv.selectedText()
+	tv.selecting = true
+	feedTestView(t, tv, "\rchanged")
+	tv.scrollBy(-1)
+	if tv.snapshot == nil || tv.selectedText() != want {
+		t.Fatal("drag scrolling to the bottom released the selection")
+	}
+	tv.stopSelectionDrag()
+	tv.scrollBy(-1)
+	if frozen, offset := tv.ViewStatus(); frozen || offset != 0 {
+		t.Fatal("scrolling after the drag did not resume output")
+	}
+}
+
+func TestEscapeReturnsFromHistoryWithoutSendingToDevice(t *testing.T) {
+	tv := newTestView(t, 12, 4)
+	feedTestView(t, tv, strings.Repeat("old\r\n", 8))
+	tv.setScrollOffset(2)
+	var sent string
+	tv.sendText = func(text string) error { sent += text; return nil }
+	tv.WndProc(0, win.WM_CHAR, 27, 0)
+	if sent != "" || tv.scrollOffset != 0 {
+		t.Fatal("Escape should leave history without sending a character")
+	}
+	tv.WndProc(0, win.WM_CHAR, 27, 0)
+	if sent != "\x1b" {
+		t.Fatal("Escape in live mode should reach the device")
+	}
+}
+
+func TestSelectAllIncludesHistoryAndFreezesIncomingOutput(t *testing.T) {
+	tv := newTestView(t, 12, 4)
+	feedTestView(t, tv, "first\r\nsecond\r\nthird\r\nfourth\r\nfifth")
+	tv.selectAll()
+	want := "first\r\nsecond\r\nthird\r\nfourth\r\nfifth"
+	if got := tv.selectedText(); got != want {
+		t.Fatalf("select all = %q, want %q", got, want)
+	}
+	feedTestView(t, tv, "\r\nnew output")
+	if got := tv.selectedText(); got != want {
+		t.Fatalf("incoming output changed select all: %q", got)
+	}
+	tv.ResumeLive()
+	if frozen, offset := tv.ViewStatus(); frozen || offset != 0 || tv.selectionSet {
+		t.Fatal("explicit resume did not clear selection")
 	}
 }

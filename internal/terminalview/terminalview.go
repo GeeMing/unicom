@@ -51,6 +51,9 @@ type TerminalView struct {
 	dragScroll   int
 	dragMoved    bool
 	suppressChar uint16
+
+	viewChangedPublisher                  walk.EventPublisher
+	copyAction, pasteAction, latestAction *walk.Action
 }
 
 // cellPosition addresses a cell in the combined scrollback + live screen.
@@ -73,6 +76,11 @@ func New(parent walk.Container, sendBytes func([]byte) error, sendText func(stri
 	tv.SetInvalidatesOnResize(true)
 	tv.Disposing().Attach(tv.disposeResources)
 	if err = tv.Reset(); err != nil {
+		tv.Dispose()
+		return nil, err
+	}
+	if err = tv.initContextMenu(); err != nil {
+		tv.Dispose()
 		return nil, err
 	}
 	return tv, nil
@@ -83,6 +91,16 @@ func (tv *TerminalView) LayoutFlags() walk.LayoutFlags {
 }
 func (tv *TerminalView) MinSizeHint() walk.Size { return walk.Size{Width: 320, Height: 180} }
 func (tv *TerminalView) SizeHint() walk.Size    { return walk.Size{Width: 720, Height: 432} }
+
+// ViewStatus reports whether a selection has frozen the view and how far the
+// viewport is above the bottom. Access it on the UI thread.
+func (tv *TerminalView) ViewStatus() (frozen bool, historyOffset int) {
+	return tv.snapshot != nil, tv.scrollOffset
+}
+
+func (tv *TerminalView) ViewChanged() *walk.Event {
+	return tv.viewChangedPublisher.Event()
+}
 
 func (tv *TerminalView) Reset() error {
 	state := new(vt10x.State)
@@ -176,6 +194,7 @@ func (tv *TerminalView) clampScrollOffset(history int) {
 }
 
 func (tv *TerminalView) updateScrollBar() {
+	defer tv.viewChangedPublisher.Publish()
 	if tv.CustomWidget == nil || tv.Handle() == 0 {
 		return
 	}
@@ -193,11 +212,19 @@ func (tv *TerminalView) updateScrollBar() {
 }
 
 func (tv *TerminalView) setScrollOffset(offset int) {
+	// Scrolling to the bottom resumes incoming output, except while an active
+	// drag still needs its snapshot to keep selection coordinates stable.
+	if offset <= 0 && !tv.selecting {
+		tv.resumeLive()
+		return
+	}
 	history := tv.historySize()
 	tv.scrollOffset = offset
 	tv.clampScrollOffset(history)
 	tv.updateScrollBar()
-	tv.Invalidate()
+	if tv.CustomWidget != nil {
+		tv.Invalidate()
+	}
 }
 
 func (tv *TerminalView) scrollBy(lines int) {
@@ -385,6 +412,11 @@ func (tv *TerminalView) disposeResources() {
 	tv.stopSelectionDrag()
 	tv.font.dispose()
 	tv.snapshot = nil
+	if menu := tv.ContextMenu(); menu != nil {
+		menu.Actions().Clear()
+		menu.Dispose()
+		tv.SetContextMenu(nil)
+	}
 	for color, brush := range tv.brushes {
 		brush.Dispose()
 		delete(tv.brushes, color)
@@ -503,6 +535,7 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 		tv.dragMouse = lParam
 		tv.dragMoved = false
 		tv.selecting, tv.selectionSet = true, true
+		tv.viewChangedPublisher.Publish()
 		win.SetCapture(hwnd)
 		tv.Invalidate()
 		return 0
@@ -551,12 +584,16 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 		return 0
 	case win.WM_CAPTURECHANGED, win.WM_CANCELMODE:
 		tv.stopSelectionDrag()
-	case win.WM_RBUTTONUP:
-		if tv.selectionSet && tv.copySelection() {
-			return 0
+	case win.WM_CONTEXTMENU:
+		tv.SetFocus()
+		tv.updateContextMenu()
+		// The keyboard context-menu key supplies (-1, -1). Anchor its menu
+		// inside the terminal instead of passing an off-screen position.
+		if int32(lParam) == -1 {
+			point := win.POINT{X: int32(tv.font.width), Y: int32(tv.font.height)}
+			win.ClientToScreen(hwnd, &point)
+			lParam = uintptr(uint16(point.X)) | uintptr(uint16(point.Y))<<16
 		}
-		tv.paste()
-		return 0
 	case win.WM_SETFOCUS, win.WM_KILLFOCUS:
 		tv.Invalidate()
 	case win.WM_SIZE:
@@ -606,7 +643,7 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 				return 0
 			}
 		}
-		if wParam == 27 && tv.snapshot != nil {
+		if wParam == 27 && (tv.snapshot != nil || tv.scrollOffset != 0) {
 			tv.resumeLive()
 			return 0
 		}
@@ -623,12 +660,11 @@ func (tv *TerminalView) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintpt
 		tv.suppressChar = 0
 		if (wParam == uintptr(walk.KeyC) && walk.ControlDown() && walk.ShiftDown()) ||
 			(wParam == win.VK_INSERT && walk.ControlDown()) {
-			if tv.copySelection() {
-				if wParam == uintptr(walk.KeyC) {
-					tv.suppressChar = 3
-				}
-				return 0
+			tv.copySelection()
+			if wParam == uintptr(walk.KeyC) {
+				tv.suppressChar = 3
 			}
+			return 0
 		}
 		if walk.ShiftDown() && (wParam == win.VK_PRIOR || wParam == win.VK_NEXT) {
 			rows, _, _ := tv.viewSize()
@@ -675,6 +711,11 @@ func (tv *TerminalView) resumeLive() {
 	if tv.CustomWidget != nil {
 		tv.Invalidate()
 	}
+}
+
+// ResumeLive releases any selection and follows the latest received output.
+func (tv *TerminalView) ResumeLive() {
+	tv.resumeLive()
 }
 
 func maxInt(a, b int) int {
